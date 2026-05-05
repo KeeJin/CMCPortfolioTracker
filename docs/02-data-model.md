@@ -13,8 +13,11 @@ All ingestion, processing, and API layers MUST conform to these models.
 * Use **simple, explicit structures**
 * Avoid deeply nested or overly abstract schemas
 * Prefer flat, predictable objects
-* All financial values are stored as **numbers in SGD**
-* Dates are stored as **ISO strings (YYYY-MM-DD)**
+* **All financial values are stored in USD internally** (prices from Yahoo Finance)
+  * Baseline cash and transaction amounts are parsed in SGD from CMC Invest statements
+  * During calculation: DEPOSIT/WITHDRAWAL cash flows converted SGD → USD using FX rates
+  * Portfolio holdings values are in USD (quantity × price USD)
+* **Dates are stored as ISO strings (YYYY-MM-DD)** with UTC semantics
 
 ---
 
@@ -29,7 +32,9 @@ type Baseline = {
 
   holdings: Record<string, number> // symbol → share count
 
-  cash: number // total cash balance (SGD)
+  holdingPrices?: Record<string, number> // optional baseline price per symbol (USD)
+
+  cash: number // total cash balance from CMC statement (SGD)
 
   source?: string // optional (e.g. filename)
 }
@@ -39,7 +44,9 @@ type Baseline = {
 
 * `holdings` must NOT contain zero or negative values
 * Missing symbols imply zero holdings
-* Baseline is treated as **ground truth**
+* `cash` is in SGD (from CMC Invest summary table "Bank Balance")
+* `holdingPrices` are in USD (from CMC Invest equities table "Last Price" column)
+* Baseline is treated as **ground truth** for date and quantities
 
 ---
 
@@ -54,6 +61,7 @@ type TransactionType =
   | "DIVIDEND"
   | "DEPOSIT"
   | "WITHDRAWAL"
+  | "SPLIT"
 
 type Transaction = {
   id: string // unique transaction reference (from broker)
@@ -62,13 +70,15 @@ type Transaction = {
 
   type: TransactionType
 
-  symbol?: string // required for BUY/SELL/DIVIDEND
+  symbol?: string // required for BUY/SELL/DIVIDEND/SPLIT
 
   quantity?: number // required for BUY/SELL
 
-  price?: number // per-share price (SGD, if available)
+  price?: number // per-share price (USD for Yahoo Finance stocks, SGD as stated in CMC statement)
 
-  amount: number // total cash impact (SGD)
+  amount: number // total cash impact (SGD from CMC statement debit/credit columns)
+
+  splitRatio?: number // for SPLIT: new shares / old shares
 
   rawDescription?: string // original text from statement
   source?: string // filename or upload batch
@@ -82,10 +92,21 @@ type Transaction = {
 
   * positive for inflows (SELL, DIVIDEND, DEPOSIT)
   * negative for outflows (BUY, WITHDRAWAL)
+  * **in SGD from the CMC statement debit/credit columns**
 * `symbol` is:
 
-  * required for BUY / SELL / DIVIDEND
+  * required for BUY / SELL / DIVIDEND / SPLIT
   * null/undefined for DEPOSIT / WITHDRAWAL
+* `price` is:
+
+  * extracted from BUY/SELL description (e.g. "@ 301.5441 SGD")
+  * may be in SGD if quoted by CMC, or USD for holdings from statement transaction history
+  * used only for transaction-forward-fill pricing; ignored for external price sources
+* `splitRatio` is:
+
+  * required for SPLIT
+  * represented as `new_shares / old_shares`
+  * `8` for `8:1`, `0.05` for `1:20`
 
 ---
 
@@ -105,6 +126,8 @@ type NormalizedTransaction = {
   price: number | null
 
   amount: number
+
+  splitRatio: number | null
 
   source: string
 }
@@ -226,6 +249,11 @@ When applying a transaction:
 
   * decrease cash (NOT performance)
 
+* SPLIT:
+
+  * multiply holdings[symbol] by splitRatio
+  * do not change cash
+
 ---
 
 ### Deduplication
@@ -283,6 +311,11 @@ Additional:
 * DIVIDEND:
 
   * symbol required
+
+* SPLIT:
+
+  * symbol required
+  * splitRatio > 0
 
 ---
 

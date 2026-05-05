@@ -149,12 +149,12 @@ describe("parseBaselineText — error cases", () => {
     expect(result.error.reason).toContain("MISSING DATE");
   });
 
-  it("returns error when Bank Balance is missing", () => {
+  it("defaults cash to zero when Bank Balance is missing", () => {
     const noCash = SAMPLE_HEADER + SAMPLE_HOLDINGS_ROWS;
     const result = parseBaselineText(noCash, "x");
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error.reason).toContain("MISSING CASH");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.baseline.cash).toBe(0);
   });
 
   it("returns error when no holdings are found", () => {

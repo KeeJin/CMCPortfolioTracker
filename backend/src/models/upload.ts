@@ -7,4 +7,11 @@ export type Upload = {
     start: string; // ISO format: YYYY-MM-DD
     end: string; // ISO format: YYYY-MM-DD
   };
+  metadata?: {
+    baselineDate?: string;
+    transactionCount?: number;
+    duplicatesIgnored?: number;
+    parseErrors?: number;
+    reconciliationStatus?: "MATCH" | "MINOR_MISMATCH" | "MAJOR_MISMATCH";
+  };
 };

@@ -4,6 +4,7 @@ import {
   extractQuantity,
   extractPrice,
   calculateAmount,
+  parseTransactionStatementText,
   parseTransactionRow,
   parseRawRow,
 } from "../../src/parsers/transaction";
@@ -97,6 +98,9 @@ describe("extractPrice", () => {
   it("extracts price 786.2644 from META buy", () => {
     expect(extractPrice("Bght 6 META:US @ 786.2644")).toBe(786.2644);
   });
+  it("extracts price 1242.1078 when sample PDF text contains spaced thousands", () => {
+    expect(extractPrice("Sold 1 COST:US @ 1 242.1078 SGD")).toBe(1242.1078);
+  });
   it("returns null when no @ price present", () => {
     expect(extractPrice("Dep CHASSGSG 100000003011513")).toBeNull();
   });
@@ -137,6 +141,7 @@ describe("parseRawRow", () => {
     expect(result!.date).toBe("18/11/2025");
     expect(result!.reference).toBe("33797");
     expect(result!.description).toContain("Sold 15 TXRH:US");
+    expect(result!.credit).toBe(3314.62);
   });
 
   it("parses a DIVIDEND row correctly", () => {
@@ -144,6 +149,16 @@ describe("parseRawRow", () => {
     expect(result).not.toBeNull();
     expect(result!.date).toBe("10/11/2025");
     expect(result!.reference).toBe("3959750");
+    expect(result!.credit).toBe(8.26);
+  });
+
+  it("parses a sample withdrawal row with debit amount", () => {
+    const result = parseRawRow(
+      "18/11/2025         30607526            Wdl CHASSGSG 100000003011513 33784(FX) 33797(FX) 33799(FX)                                                                       3,093.52                0.00"
+    );
+    expect(result).not.toBeNull();
+    expect(result!.reference).toBe("30607526");
+    expect(result!.debit).toBe(3093.52);
   });
 
   it("returns null for empty string", () => {
@@ -291,5 +306,38 @@ describe("parseTransactionRow — error cases", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.reason).toContain("Could not determine amount");
+  });
+});
+
+describe("parseTransactionStatementText", () => {
+  it("extracts transaction rows from sample-style pdftotext output", () => {
+    const text = `Date               Reference           Description                                                                                                   Debit                Credit          Balance
+10/11/2025         3959750             JNL3959750 ASML:US Intl Div Ex:29/10/25                                                                                               8.26            8.26Cr
+18/11/2025         33784               Bght 10 AMZN:US @ 301.5441 SGD                                                                             3,015.44                                3,015.44
+18/11/2025         30607526            Wdl CHASSGSG 100000003011513 33784(FX) 33797(FX) 33799(FX)                                                                       3,093.52                0.00`;
+
+    expect(parseTransactionStatementText(text)).toEqual([
+      {
+        date: "10/11/2025",
+        reference: "3959750",
+        description: "JNL3959750 ASML:US Intl Div Ex:29/10/25",
+        debit: null,
+        credit: 8.26,
+      },
+      {
+        date: "18/11/2025",
+        reference: "33784",
+        description: "Bght 10 AMZN:US @ 301.5441 SGD",
+        debit: 3015.44,
+        credit: null,
+      },
+      {
+        date: "18/11/2025",
+        reference: "30607526",
+        description: "Wdl CHASSGSG 100000003011513 33784(FX) 33797(FX) 33799(FX)",
+        debit: 3093.52,
+        credit: null,
+      },
+    ]);
   });
 });

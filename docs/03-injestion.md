@@ -43,6 +43,26 @@ Refer to samples/PortfolioReport-785691-202604280541.pdf for baseline format
 Raw File → Extract Text → Parse Rows → Classify → Normalize → Validate → Store
 ```
 
+### Currency Semantics
+
+**CMC Invest Transaction Statement (all in SGD)**:
+- Debit / Credit columns: SGD (cash flow out of / into the account)
+- Description prices (e.g. "@ 301.5441 SGD"): SGD as stated
+- Deposits / Withdrawals: SGD amounts (in/out of linked SGD bank account)
+
+**CMC Invest Portfolio Report**:
+- Summary table: "Bank Balance" → SGD (cash balance)
+- Equities table:
+  - "Quantity": share count (unitless)
+  - "Last Price": USD per share (e.g. "230.820USD")
+  - "Average Cost SGD": SGD (historical, not used for pricing)
+  - "Market Value SGD": SGD (calculated as Quantity × Last Price × FX)
+
+**Internal System**:
+- Portfolio holdings values computed in USD (quantity × price USD from Yahoo Finance or baseline)
+- Cash flows (DEPOSIT/WITHDRAWAL) converted SGD → USD using USDSGD=X FX rate before TWR/IRR
+- Display: user can toggle between USD and SGD (multiply by current rate)
+
 ---
 
 ## 1. Transaction Parsing
@@ -94,6 +114,7 @@ if description.includes("Sold") → type = "SELL"
 if description.includes("Intl Div") → type = "DIVIDEND"
 if description.includes("Dep CHASSGSG") → type = "DEPOSIT"
 if description.includes("Wdl CHASSGSG") → type = "WITHDRAWAL"
+if description.includes("SPLIT") → type = "SPLIT"
 ```
 
 ### Notes
@@ -122,7 +143,7 @@ Find token matching pattern: [A-Z]+:US
 * If no symbol found:
 
   * allowed for DEPOSIT/WITHDRAWAL
-  * error for BUY/SELL/DIVIDEND
+  * error for BUY/SELL/DIVIDEND/SPLIT
 
 ---
 
@@ -157,7 +178,9 @@ Rule:
 Extract number after "@"
 ```
 
-* Store as SGD price (already converted in statement)
+* Store as-is (parsed from statement; CMC Invest quotes this in SGD)
+* **Note**: This is the transaction's historical cost basis (SGD), not the current USD price
+* For portfolio valuation: use Yahoo Finance prices in USD instead (via pricing.ts)
 
 ---
 
@@ -166,9 +189,11 @@ Extract number after "@"
 Use Debit/Credit columns:
 
 ```ts id="amount_rule"
-if credit != null → amount = +credit
-if debit != null → amount = -debit
+if credit != null → amount = +credit  // inflow in SGD
+if debit != null → amount = -debit    // outflow in SGD
 ```
+
+**All amounts are in SGD** from the CMC statement
 
 ---
 
@@ -181,11 +206,66 @@ if debit != null → amount = -debit
   type,
   symbol,
   quantity,
-  price,
-  amount,
+  price,           // in SGD (from statement)
+  amount,          // in SGD (from debit/credit)
   source: filename
 }
 ```
+
+### Stock Split Parsing
+
+Broker statements may contain stock split rows such as:
+
+```text
+STOCK SPLIT VGT:US 8:1
+Stock Split 1 for 20 ABCD:US
+```
+
+Rules:
+
+* classify as `SPLIT`
+* extract symbol using the same `[A-Z]+:US` rule
+* extract ratio from either:
+
+  * `X:Y`
+  * `X for Y`
+  * `X to Y`
+* normalize to `splitRatio = X / Y`
+* set:
+
+  * `quantity = null`
+  * `price = null`
+  * `amount = 0`
+
+---
+
+## Market-Sourced Split Enrichment
+
+Broker files are not the only source of split events.
+
+During reconstruction and valuation, the backend also fetches stock split history from Yahoo Finance using:
+
+```ts
+yahooFinance.historical(symbol, {
+  period1,
+  period2,
+  events: "split"
+})
+```
+
+Returned values look like:
+
+```ts
+{ date: Date, stockSplits: "8:1" }
+```
+
+These events are converted into normalized `SPLIT` transactions and merged into the post-baseline stream.
+
+Rules:
+
+* market split enrichment happens before reconstruction
+* split events from Yahoo Finance and broker statements must not be double-counted
+* fetched split events are best-effort; failure to fetch must not break the request
 
 ---
 
@@ -206,13 +286,15 @@ if transaction.id already exists → ignore new transaction
 Lines like:
 
 ```text id="deposit_example"
-Dep CHASSGSG
-Wdl CHASSGSG
+Dep CHASSGSG         (Deposit to linked SGD account)
+Wdl CHASSGSG         (Withdrawal from linked SGD account)
 ```
 
-* Represent cash movement ONLY
-* MUST NOT be counted as performance
+* Represent cash movement **in SGD** only
+* MUST NOT be counted as performance (no price impact)
 * MUST still update cash balance
+* **Amount is in SGD** (from debit/credit columns)
+* Later: convert SGD → USD using FX rates before TWR/IRR calculations
 
 ---
 
@@ -221,12 +303,13 @@ Wdl CHASSGSG
 Lines like:
 
 ```text id="div_example"
-ASML:US Intl Div
+ASML:US Intl Div      (International dividend paid in SGD)
 ```
 
 * MUST be classified as DIVIDEND
-* MUST increase cash
+* MUST increase cash **in SGD**
 * MUST be included in performance
+* **Amount is in SGD** (from credit column)
 
 ---
 
@@ -235,12 +318,12 @@ ASML:US Intl Div
 Lines like:
 
 ```text id="fx_example"
-Wdl CHASSGSG ... (FX)
+Wdl CHASSGSG ... (FX)   (withdrawal with FX settlement)
 ```
 
-* Represent internal settlement
+* Represent internal settlement of trading-related cash
 * Treat as WITHDRAWAL
-* Do NOT attempt FX conversion logic
+* Do NOT attempt FX conversion logic (already settled by CMC)
 
 ---
 
@@ -248,25 +331,35 @@ Wdl CHASSGSG ... (FX)
 
 ### Input Format
 
-Table with:
+**CMC Invest Portfolio Report** has two sections:
 
-* Symbol
-* Quantity
-* Market Value
-* Other metadata
-
-Example:
-
-```text id="baseline_example"
-AMZN:US ... Quantity: 128
-NVDA:US ... Quantity: 222
+#### Summary Table (all SGD)
 ```
+Description                        Market Value (SGD)
+Shares                                       193,304.20
+Bank Balance                                   5,890.15
+Total                                        199,194.35
+```
+
+#### Equities Report Table (mixed currencies)
+```
+Security   Quantity   Last Price      Cost       Market Value  ...
+code                                 SGD        Value SGD
+AMZN:US    128        230.820USD                 37,813.063
+ASML:US    4          1,069.860USD               5,477.033
+```
+
+**Column currencies**:
+- "Quantity": unitless (share count)
+- "Last Price": USD (e.g. "230.820USD")
+- "Cost SGD": SGD (historical cost, not used for current valuation)
+- "Market Value SGD": SGD (calculated by CMC: Quantity × Last Price USD × USDSGD FX)
 
 ---
 
 ## Step 1 — Extract Holdings
 
-For each row:
+For each row in Equities Report:
 
 ```ts id="baseline_holdings"
 holdings[symbol] = quantity
@@ -281,19 +374,38 @@ Rules:
 
 ## Step 2 — Extract Cash
 
-From summary section:
+From Summary section:
 
 ```text id="cash_example"
 Bank Balance 5,890.15
 ```
 
 ```ts id="cash_rule"
-cash = parsed value
+cash = parsed value (SGD)
 ```
+
+**Note**: Cash is in SGD (Singapore Dollar, the account currency)
 
 ---
 
-## Step 3 — Extract Date
+## Step 3 — Extract Holding Prices
+
+From Equities Report, extract "Last Price" (USD):
+
+```text id="price_example"
+AMZN:US ... 230.820USD
+ASML:US ... 1,069.860USD
+```
+
+```ts id="price_rule"
+prices[symbol] = parsed USD value (strip "USD" suffix)
+```
+
+**Note**: These are USD prices from Yahoo Finance via CMC's feed. Used only for baseline snapshot; prefer live Yahoo Finance prices for post-baseline valuation.
+
+---
+
+## Step 4 — Extract Date
 
 From header:
 
@@ -305,14 +417,15 @@ Convert to ISO format.
 
 ---
 
-## Step 4 — Create Baseline Object
+## Step 5 — Create Baseline Object
 
 ```ts id="baseline_obj"
 {
   id: generated_id,
-  date,
-  holdings,
-  cash,
+  date,           // ISO: YYYY-MM-DD
+  holdings,       // symbol → share count (unitless)
+  holdingPrices,  // symbol → USD price
+  cash,           // SGD (from Bank Balance)
   source: filename
 }
 ```
@@ -328,13 +441,14 @@ After parsing:
 * id must exist
 * date must be valid
 * type must be known
-* amount must be number
+* amount must be number (SGD)
 
 ### Baseline Validation
 
 * date must exist
 * holdings must be non-negative
-* cash must be >= 0
+* cash must be >= 0 (SGD)
+* holdingPrices (if present) must be positive numbers (USD)
 
 ---
 
@@ -347,6 +461,7 @@ If parsing fails:
 
   * row content
   * reason
+  * currency context (where applicable)
 
 Examples:
 
@@ -354,24 +469,41 @@ Examples:
 UNKNOWN TRANSACTION TYPE
 MISSING SYMBOL FOR BUY
 INVALID DATE FORMAT
+MISSING CASH VALUE (defaults to 0)
 ```
 
 ---
 
 ## 5. Assumptions
 
-* All values are already in SGD
-* No need for FX conversion
+* **Transaction amounts are in SGD** (from CMC statement debit/credit)
+* **Baseline cash is in SGD** (from CMC summary "Bank Balance")
+* **Baseline prices are in USD** (from CMC equities "Last Price" column)
+* Baseline "Market Value SGD" is CMC's calculation; we recompute in USD post-baseline
+* No OCR (assume text-extractable PDFs)
 * Statements may overlap in time
-* Transaction IDs are unique
+* Transaction IDs are unique per statement
+* FX conversion (SGD ↔ USD) happens **after** parsing, during calculation
 
 ---
 
-## 6. Non-Goals
+## 6. FX Conversion (Post-Parsing)
 
-* No OCR (assume text-extractable PDFs)
-* No support for multiple brokers
+After transactions and baselines are parsed:
+
+* DEPOSIT/WITHDRAWAL `amount` (SGD) → USD using `USDSGD=X` historical rates
+  * Formula: `amount_usd = amount_sgd / usd_sgd_rate`
+  * Applied before TWR/IRR calculations
+  * Ensures performance metrics are in a single currency
+* Display layer: user toggles USD ↔ SGD by multiplying holdings_value_usd × current_fx_rate
+
+---
+
+## 7. Non-Goals
+
+* No support for multiple brokers (CMC Invest Singapore only)
 * No automatic correction of malformed data
+* No currency detection (currency is fixed per field in CMC reports)
 
 ---
 
@@ -380,8 +512,10 @@ INVALID DATE FORMAT
 Parsing must be:
 
 > **deterministic, explicit, and debuggable**
+> with **clear currency labeling at every step**
 
-Every parsed transaction should be traceable back to:
+Every parsed value should be traceable back to:
 
-* original row
+* original PDF row and column
+* currency (SGD or USD)
 * classification rule used

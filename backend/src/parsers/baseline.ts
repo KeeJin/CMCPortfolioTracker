@@ -68,6 +68,32 @@ export function extractHoldings(text: string): Record<string, number> {
   return holdings;
 }
 
+// Extracts per-symbol baseline prices from the holdings table.
+// Falls back to the price column next to quantity (e.g. "230.820USD").
+export function extractHoldingPrices(text: string): Record<string, number> {
+  const prices: Record<string, number> = {};
+
+  for (const line of text.split("\n")) {
+    const symbolMatch = line.match(/^\s*([A-Z]+):US\b/);
+    if (!symbolMatch) continue;
+
+    const symbol = symbolMatch[1] as string;
+    const priceMatch = line.match(/\b\d+\s+([\d,]+\.\d+)USD/);
+    if (!priceMatch) {
+      continue;
+    }
+
+    const price = parseFloat((priceMatch[1] as string).replace(/,/g, ""));
+    if (!Number.isFinite(price) || price <= 0) {
+      continue;
+    }
+
+    prices[symbol] = price;
+  }
+
+  return prices;
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 // Parse extracted text from a CMC Invest Portfolio Report into a Baseline object.
 // The `id` parameter should be a unique identifier supplied by the caller
@@ -87,14 +113,8 @@ export function parseBaselineText(
     };
   }
 
-  // Extract cash
-  const cash = extractCash(text);
-  if (cash === null) {
-    return {
-      ok: false,
-      error: { reason: "MISSING CASH: could not find 'Bank Balance'" },
-    };
-  }
+  // Cash is optional for stock-only tracking. Missing bank balance defaults to 0.
+  const cash = extractCash(text) ?? 0;
 
   // Extract holdings
   const holdings = extractHoldings(text);
@@ -105,10 +125,13 @@ export function parseBaselineText(
     };
   }
 
+  const holdingPrices = extractHoldingPrices(text);
+
   const baseline: Baseline = {
     id,
     date,
     holdings,
+    holdingPrices,
     cash,
     ...(source ? { source } : {}),
   };

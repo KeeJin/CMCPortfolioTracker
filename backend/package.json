@@ -4,16 +4,21 @@
   "description": "",
   "main": "dist/app.js",
   "scripts": {
-    "dev": "nodemon --exec \"node --loader ts-node/esm src/app.ts\"",
+    "dev": "nodemon --watch src --ext ts,js,mjs,cjs,json --ignore 'data/**' --ignore 'dist/**' --exec \"node --loader ts-node/esm src/app.ts\"",
     "build": "tsc",
     "start": "node dist/app.js",
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest"
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "validate:pdf-samples": "node --loader ts-node/esm scripts/validatePdfSamples.ts"
   },
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
-    "testMatch": ["**/tests/**/*.test.ts"],
-    "extensionsToTreatAsEsm": [".ts"],
+    "testMatch": [
+      "**/tests/**/*.test.ts"
+    ],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"
     }
@@ -23,8 +28,11 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@types/multer": "^2.1.0",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "yahoo-finance2": "^3.14.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

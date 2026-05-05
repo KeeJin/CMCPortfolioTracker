@@ -47,6 +47,7 @@ Types:
 * DIVIDEND → increases cash (counts as return)
 * DEPOSIT → increases cash (NOT performance)
 * WITHDRAWAL → decreases cash (NOT performance)
+* SPLIT → changes share count without changing cash
 
 Transactions may be:
 
@@ -60,13 +61,26 @@ Transactions may be:
 
 The system reconstructs portfolio state by:
 
-1. Starting from a baseline
-2. Applying all transactions AFTER the baseline date
+1. Starting from the latest authoritative baseline, if one exists
+2. Enriching the post-baseline transaction stream with known market stock splits
+3. Applying all transactions AFTER that baseline date
+
+If no baseline exists yet, the system must still reconstruct state using:
+
+1. a synthetic zero-state anchor
+2. all uploaded transactions in chronological order
 
 This produces:
 
 * holdings over time
 * cash balance over time
+
+Stock splits may come from two sources:
+
+* parsed broker statement rows
+* Yahoo Finance corporate action history
+
+If the same split exists in both sources, it must only be applied once.
 
 ---
 
@@ -119,16 +133,24 @@ The system operates using three layers:
 
 ## Data Flow
 
-1. User uploads baseline
-2. User uploads transaction files
-3. System parses and normalizes data
-4. System reconstructs portfolio state
-5. System computes:
+Uploads are **actions**, not steps in a required sequence.
+
+The user may:
+
+* upload transactions before any baseline
+* upload multiple baselines over time
+* upload baselines and transactions in any order
+
+After each action, the system:
+
+1. parses and normalizes data
+2. records the action in history
+3. reconstructs current portfolio state
+4. computes:
 
    * portfolio value
    * performance metrics
-6. User may upload a new baseline
-7. System performs reconciliation
+5. performs reconciliation when a new baseline has an earlier baseline to compare against
 
 ---
 
@@ -168,14 +190,20 @@ The system should support:
 * Reconciliation reports:
 
   * differences between expected and actual holdings
+* Position-level market values for the current portfolio table
 
 ---
 
 ## Assumptions
 
-* User provides at least one valid baseline
 * Transaction data may be incomplete
 * Market price data will be sourced separately (not from broker reports)
+
+The system should behave correctly whether the user uploads:
+
+* transactions only
+* baselines only
+* baselines and transactions interleaved over time
 
 ---
 
@@ -189,3 +217,38 @@ If data is inconsistent:
 
 * the system must surface it
 * the user must be able to understand and resolve it
+
+---
+
+## Data Persistence
+
+All user data (baselines, transactions, upload history) is persisted to disk in the `backend/data/` directory as JSON files:
+
+* `baselines.json` → all stored baselines
+* `transactions.json` → all deduplicated transactions
+* `uploads.json` → upload action history
+
+The store is loaded at server startup via `initStore()` and written to disk automatically after every mutation. Restarting the server does **not** wipe any user data.
+
+---
+
+## Price Cache
+
+Historical and live price data fetched from external APIs (Yahoo Finance) is cached in `backend/data/price-cache.json`.
+
+* **Historical prices** (past dates) are cached indefinitely — they do not change.
+* **Live (today's) prices** are cached with a 15-minute TTL.
+
+On a cache hit the route skips the external API call entirely. On a miss the data is fetched, stored in the cache, and flushed to disk.
+
+---
+
+## Eager Loading
+
+On server startup, after user data is loaded, the backend kicks off a background prefetch:
+
+1. Reconstructs current holdings from the latest baseline + transactions.
+2. Fetches 5 years of daily price history for all active holdings from Yahoo Finance.
+3. Stores the result in the price cache.
+
+This means that by the time a user visits the dashboard, price data for **all** available timeframes (5d → 5y) is already in the cache and served instantly without waiting for external API calls.

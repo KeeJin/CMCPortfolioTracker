@@ -54,6 +54,21 @@ export function applyTransaction(
     return state;
   }
 
+  if (tx.type === "SPLIT") {
+    if (tx.symbol === null || tx.splitRatio === null || tx.splitRatio <= 0) {
+      return state;
+    }
+
+    const current = state.holdings[tx.symbol] ?? 0;
+    if (current === 0) {
+      return state;
+    }
+
+    state.holdings[tx.symbol] = current * tx.splitRatio;
+    state.date = tx.date;
+    return state;
+  }
+
   return state;
 }
 

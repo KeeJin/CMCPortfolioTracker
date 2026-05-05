@@ -1,33 +1,46 @@
 import { Router } from "express";
-import { parseTransactionRow } from "../parsers/transaction.js";
-import { addTransactions, getAllTransactions } from "../store.js";
-import type { RawTransactionRow } from "../parsers/transaction.js";
+import multer from "multer";
+import { parseTransactionRow, parseTransactionStatementText } from "../parsers/transaction.js";
+import { addTransactions, getAllTransactions, recordUpload } from "../store.js";
 import type { NormalizedTransaction } from "../models/index.js";
+import { randomUUID } from "crypto";
+import { extractTextFromUploadedFile } from "../parsers/upload.js";
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
 // POST /api/transactions
 //
-// Accepts a JSON body:
-//   { rows: RawTransactionRow[], source?: string }
-//
-// Each row is a pre-structured object (no PDF parsing required at this stage).
-// Returns a summary of how many transactions were added vs deduplicated.
+// Accepts a multipart upload containing the statement PDF.
 
-router.post("/", (req, res) => {
-  const body = req.body as { rows?: unknown; source?: unknown };
-
-  if (!Array.isArray(body.rows) || body.rows.length === 0) {
-    res.status(400).json({ error: "body.rows must be a non-empty array" });
+router.post("/", upload.single("file"), async (req, res) => {
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "multipart field 'file' is required" });
     return;
   }
 
-  const source = typeof body.source === "string" ? body.source : "";
+  const source = file.originalname || "transactions-upload";
+
+  let text: string;
+
+  try {
+    text = await extractTextFromUploadedFile(file);
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : "Failed to read upload" });
+    return;
+  }
+
+  const rows = parseTransactionStatementText(text);
+  if (rows.length === 0) {
+    res.status(422).json({ error: "No transaction rows found in uploaded file" });
+    return;
+  }
 
   const accepted: NormalizedTransaction[] = [];
   const errors: { row: unknown; reason: string }[] = [];
 
-  for (const row of body.rows as RawTransactionRow[]) {
+  for (const row of rows) {
     const result = parseTransactionRow(row, source);
     if (result.ok) {
       accepted.push(result.transaction);
@@ -37,6 +50,37 @@ router.post("/", (req, res) => {
   }
 
   const { added, duplicates } = addTransactions(accepted);
+
+  let startDate: string | undefined;
+  let endDate: string | undefined;
+
+  for (const tx of accepted) {
+    if (!startDate || tx.date < startDate) {
+      startDate = tx.date;
+    }
+    if (!endDate || tx.date > endDate) {
+      endDate = tx.date;
+    }
+  }
+
+  recordUpload({
+    id: randomUUID(),
+    type: "TRANSACTIONS",
+    filename: source || `transactions-${new Date().toISOString()}`,
+    uploadedAt: new Date().toISOString(),
+    dateRange:
+      startDate && endDate
+        ? {
+            start: startDate,
+            end: endDate,
+          }
+        : undefined,
+    metadata: {
+      transactionCount: added,
+      duplicatesIgnored: duplicates,
+      parseErrors: errors.length,
+    },
+  });
 
   res.status(200).json({
     added,

@@ -52,17 +52,27 @@ const TIMEFRAME_OPTIONS: Array<{ value: PortfolioTimeframe; label: string }> = [
   { value: '1y', label: '1Y' },
   { value: '3y', label: '3Y' },
   { value: '5y', label: '5Y' },
+  { value: 'all', label: 'All' },
 ]
 
-function formatCurrency(value: number | undefined): string {
-  if (value === undefined) return '—'
+type DisplayCurrency = 'USD' | 'SGD'
+type HoldingsSortKey = 'symbol' | 'quantity' | 'value'
+type SortDirection = 'asc' | 'desc'
 
-  return new Intl.NumberFormat('en-SG', {
+function formatCurrency(
+  value: number | undefined,
+  displayCurrency: DisplayCurrency = 'USD',
+  usdSgdRate?: number | null
+): string {
+  if (value === undefined) return '—'
+  const converted =
+    displayCurrency === 'SGD' && usdSgdRate ? value * usdSgdRate : value
+  return new Intl.NumberFormat(displayCurrency === 'SGD' ? 'en-SG' : 'en-US', {
     style: 'currency',
-    currency: 'SGD',
+    currency: displayCurrency,
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value)
+  }).format(converted)
 }
 
 function formatPercent(value: number | undefined): string {
@@ -70,16 +80,53 @@ function formatPercent(value: number | undefined): string {
   return `${(value * 100).toFixed(2)}%`
 }
 
-function formatSignedCurrency(value: number | undefined): string {
+function formatSignedCurrency(
+  value: number | undefined,
+  displayCurrency: DisplayCurrency = 'USD',
+  usdSgdRate?: number | null
+): string {
   if (value === undefined) return '—'
   const sign = value > 0 ? '+' : value < 0 ? '-' : ''
-  return `${sign}${formatCurrency(Math.abs(value))}`
+  return `${sign}${formatCurrency(Math.abs(value), displayCurrency, usdSgdRate)}`
 }
 
 function formatSignedPercent(value: number | undefined): string {
   if (value === undefined) return '—'
   const sign = value > 0 ? '+' : value < 0 ? '-' : ''
   return `${sign}${Math.abs(value * 100).toFixed(2)}%`
+}
+
+function compareMaybeNumber(
+  left: number | undefined,
+  right: number | undefined,
+  direction: SortDirection,
+): number {
+  if (left === undefined && right === undefined) return 0
+  if (left === undefined) return 1
+  if (right === undefined) return -1
+
+  if (left < right) return direction === 'asc' ? -1 : 1
+  if (left > right) return direction === 'asc' ? 1 : -1
+  return 0
+}
+
+function MetricLabel({ label, tooltip }: { label: string; tooltip: string }) {
+  return (
+    <p className="flex items-center gap-1 text-xs uppercase tracking-[0.16em] text-slate-400">
+      <span>{label}</span>
+      <span className="group relative inline-flex items-center">
+        <span
+          className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-400/70 text-[10px] font-semibold text-slate-300"
+          aria-label={`${label} definition`}
+        >
+          i
+        </span>
+        <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-56 -translate-x-1/2 rounded-md border border-white/15 bg-slate-950/95 px-2 py-1.5 text-[10px] normal-case leading-snug tracking-normal text-slate-100 shadow-lg group-hover:block group-focus-within:block">
+          {tooltip}
+        </span>
+      </span>
+    </p>
+  )
 }
 
 function getErrorMessage(error: unknown): string {
@@ -90,7 +137,7 @@ function getErrorMessage(error: unknown): string {
   return 'Unexpected error'
 }
 
-function formatXAxisLabel(date: string, timeframe: PortfolioTimeframe): string {
+function formatXAxisLabel(date: string, timeframe: PortfolioTimeframe, seriesStartDate?: string): string {
   const value = new Date(`${date}T00:00:00.000Z`)
 
   if (timeframe === '5d' || timeframe === '1m') {
@@ -99,6 +146,18 @@ function formatXAxisLabel(date: string, timeframe: PortfolioTimeframe): string {
 
   if (timeframe === '3m' || timeframe === '6m' || timeframe === 'ytd') {
     return new Intl.DateTimeFormat('en-SG', { month: 'short' }).format(value)
+  }
+
+  if (timeframe === 'all' && seriesStartDate) {
+    // Use the same interval the backend chose: weekly (<= 6 months), else monthly.
+    const spanDays = Math.round(
+      (new Date(`${date}T00:00:00.000Z`).getTime() - new Date(`${seriesStartDate}T00:00:00.000Z`).getTime()) /
+        86_400_000
+    )
+    if (spanDays <= 180) {
+      return new Intl.DateTimeFormat('en-SG', { day: '2-digit', month: 'short' }).format(value)
+    }
+    return new Intl.DateTimeFormat('en-SG', { month: 'short', year: '2-digit' }).format(value)
   }
 
   return new Intl.DateTimeFormat('en-SG', { month: 'short', year: '2-digit' }).format(value)
@@ -147,9 +206,17 @@ async function getDashboardSnapshot(
 function ValueChart({
   series,
   timeframe,
+  displayCurrency,
+  usdSgdRate,
+  mode = 'holdings',
+  twrSeries,
 }: {
   series?: PortfolioValuePoint[]
   timeframe: PortfolioTimeframe
+  displayCurrency: DisplayCurrency
+  usdSgdRate?: number | null
+  mode?: 'holdings' | 'twr'
+  twrSeries?: number[]
 }) {
   const safeSeries = Array.isArray(series) ? series : []
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
@@ -166,16 +233,41 @@ function ValueChart({
   const height = 220
   const padding = 24
   const bottomPadding = 42
-  const values = safeSeries.map((point) => point.holdingsValue)
-  const minimum = Math.min(...values)
-  const maximum = Math.max(...values)
-  const range = Math.max(maximum - minimum, 1)
+
+  // When mode is 'twr' and twrSeries aligns, plot (factor - 1) as fraction.
+  const isTwr = mode === 'twr' && Array.isArray(twrSeries) && twrSeries.length === safeSeries.length
+  const yValues = isTwr
+    ? twrSeries!.map((f) => f - 1)
+    : safeSeries.map((p) => p.holdingsValue)
+
+  const minimum = Math.min(...yValues)
+  const maximum = Math.max(...yValues)
+  const range = Math.max(maximum - minimum, isTwr ? 0.001 : 1)
+
+  const lineColor = isTwr ? '#6366f1' : '#0f766e'
+  const gradientId = isTwr ? 'twrGradient' : 'valueGradient'
+
+  function fmtTooltipY(yValue: number): string {
+    if (isTwr) {
+      const pct = yValue * 100
+      return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
+    }
+    return formatCurrency(yValue, displayCurrency, usdSgdRate)
+  }
+
+  function fmtAxisY(yValue: number): string {
+    if (isTwr) {
+      const pct = yValue * 100
+      return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
+    }
+    return formatCurrency(yValue, displayCurrency, usdSgdRate)
+  }
 
   const pointsData = safeSeries.map((point, index) => {
     const x = padding + (index * (width - padding * 2)) / Math.max(safeSeries.length - 1, 1)
-    const y =
-      height - bottomPadding - ((point.holdingsValue - minimum) / range) * (height - padding - bottomPadding)
-    return { x, y, point, index }
+    const yValue = yValues[index] ?? 0
+    const y = height - bottomPadding - ((yValue - minimum) / range) * (height - padding - bottomPadding)
+    return { x, y, point, index, yValue }
   })
 
   const points = pointsData.map((item) => `${item.x},${item.y}`).join(' ')
@@ -200,6 +292,10 @@ function ValueChart({
             <stop offset="0%" stopColor="#0f766e" stopOpacity="0.28" />
             <stop offset="100%" stopColor="#0f766e" stopOpacity="0" />
           </linearGradient>
+          <linearGradient id="twrGradient" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="#6366f1" stopOpacity="0.28" />
+            <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+          </linearGradient>
         </defs>
 
         {tickIndices.map((index) => {
@@ -223,7 +319,7 @@ function ValueChart({
                 fontSize="11"
                 fill="#64748b"
               >
-                {formatXAxisLabel(item.point.date, timeframe)}
+                {formatXAxisLabel(item.point.date, timeframe, safeSeries[0]?.date)}
               </text>
             </g>
           )
@@ -240,14 +336,14 @@ function ValueChart({
 
         <polyline
           fill="none"
-          stroke="#0f766e"
+          stroke={lineColor}
           strokeWidth="3"
           points={points}
           strokeLinejoin="round"
           strokeLinecap="round"
         />
         <polygon
-          fill="url(#valueGradient)"
+          fill={`url(#${gradientId})`}
           points={`${padding},${height - bottomPadding} ${points} ${width - padding},${height - bottomPadding}`}
         />
 
@@ -259,7 +355,7 @@ function ValueChart({
               cx={item.x}
               cy={item.y}
               r={isActive ? 4.5 : 3}
-              fill={isActive ? '#0f766e' : '#14b8a6'}
+              fill={isActive ? lineColor : (isTwr ? '#818cf8' : '#14b8a6')}
               fillOpacity={isActive ? 1 : 0.75}
               stroke="#ffffff"
               strokeWidth={isActive ? 1.8 : 1.2}
@@ -278,7 +374,7 @@ function ValueChart({
               x2={activePoint.x}
               y1={padding}
               y2={height - bottomPadding}
-              stroke="#0f766e"
+              stroke={lineColor}
               strokeOpacity="0.25"
               strokeDasharray="4 4"
             />
@@ -288,15 +384,15 @@ function ValueChart({
                 {formatTooltipDate(activePoint.point.date)}
               </text>
               <text x="10" y="34" fontSize="12" fontWeight="700" fill="#f8fafc">
-                {formatCurrency(activePoint.point.holdingsValue)}
+                {fmtTooltipY(activePoint.yValue)}
               </text>
             </g>
           </>
         )}
       </svg>
       <div className="flex items-center justify-between text-sm font-medium text-slate-700">
-        <span>{formatCurrency(minimum)}</span>
-        <span>{formatCurrency(maximum)}</span>
+        <span>{fmtAxisY(minimum)}</span>
+        <span>{fmtAxisY(maximum)}</span>
       </div>
     </div>
   )
@@ -343,6 +439,8 @@ function UploadModal({
 function App() {
   const [timeframe, setTimeframe] = useState<PortfolioTimeframe>('1y')
   const [pricingMethod, setPricingMethod] = useState<PricingMethod>('yahoo_finance')
+  const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency>('USD')
+  const [selectedChart, setSelectedChart] = useState<'holdings' | 'twr'>('holdings')
   const [baselineFile, setBaselineFile] = useState<File | null>(null)
   const [transactionFile, setTransactionFile] = useState<File | null>(null)
   const [baselineUpload, setBaselineUpload] = useState<UploadState<UploadBaselineResponse>>(EMPTY_UPLOAD_STATE)
@@ -355,6 +453,31 @@ function App() {
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false)
   const [baselineModalOpen, setBaselineModalOpen] = useState(false)
   const [transactionsModalOpen, setTransactionsModalOpen] = useState(false)
+  const [holdingsSort, setHoldingsSort] = useState<{ key: HoldingsSortKey; direction: SortDirection }>({
+    key: 'symbol',
+    direction: 'asc',
+  })
+
+  function toggleHoldingsSort(key: HoldingsSortKey) {
+    setHoldingsSort((current) => {
+      if (current.key === key) {
+        return {
+          key,
+          direction: current.direction === 'asc' ? 'desc' : 'asc',
+        }
+      }
+
+      return {
+        key,
+        direction: key === 'symbol' ? 'asc' : 'desc',
+      }
+    })
+  }
+
+  function getSortMarker(key: HoldingsSortKey) {
+    if (holdingsSort.key !== key) return '↕'
+    return holdingsSort.direction === 'asc' ? '↑' : '↓'
+  }
 
   async function refreshDashboard() {
     setPortfolioLoading(true)
@@ -466,7 +589,24 @@ function App() {
   }
 
   const holdings = portfolio
-    ? Object.entries(portfolio.state.holdings).sort(([left], [right]) => left.localeCompare(right))
+    ? Object.entries(portfolio.state.holdings)
+        .sort(([leftSymbol, leftQuantity], [rightSymbol, rightQuantity]) => {
+          if (holdingsSort.key === 'symbol') {
+            const symbolComparison = leftSymbol.localeCompare(rightSymbol)
+            return holdingsSort.direction === 'asc' ? symbolComparison : -symbolComparison
+          }
+
+          if (holdingsSort.key === 'quantity') {
+            if (leftQuantity < rightQuantity) return holdingsSort.direction === 'asc' ? -1 : 1
+            if (leftQuantity > rightQuantity) return holdingsSort.direction === 'asc' ? 1 : -1
+            return leftSymbol.localeCompare(rightSymbol)
+          }
+
+          const leftValue = portfolioValue?.positionValues?.[leftSymbol]
+          const rightValue = portfolioValue?.positionValues?.[rightSymbol]
+          const valueComparison = compareMaybeNumber(leftValue, rightValue, holdingsSort.direction)
+          return valueComparison !== 0 ? valueComparison : leftSymbol.localeCompare(rightSymbol)
+        })
     : []
 
   const series = portfolioValue?.series ?? []
@@ -476,6 +616,8 @@ function App() {
     typeof startHoldingsValue === 'number' && typeof endHoldingsValue === 'number'
       ? endHoldingsValue - startHoldingsValue
       : undefined
+  const usdSgdRate = portfolioValue?.usdSgdRate ?? null
+
   const holdingsValueChangePercent =
     typeof startHoldingsValue === 'number' &&
     typeof endHoldingsValue === 'number' &&
@@ -588,7 +730,7 @@ function App() {
                       Holdings Change ({timeframe.toUpperCase()})
                     </p>
                     <p className="mt-2 text-lg font-semibold text-white">
-                      {formatSignedCurrency(holdingsValueChange)}
+                      {formatSignedCurrency(holdingsValueChange, displayCurrency, usdSgdRate)}
                     </p>
                     <p className="mt-1 text-xs text-slate-300">
                       {formatSignedPercent(holdingsValueChangePercent)}
@@ -612,20 +754,56 @@ function App() {
                   <table className="min-w-full divide-y divide-white/10 text-left text-sm">
                     <thead className="bg-white/5 text-slate-300">
                       <tr>
-                        <th className="px-4 py-3 font-medium">Symbol</th>
-                        <th className="px-4 py-3 font-medium">Quantity</th>
+                        <th className="px-4 py-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => toggleHoldingsSort('symbol')}
+                            className="inline-flex items-center gap-2 transition hover:text-white"
+                          >
+                            <span>Symbol</span>
+                            <span className="text-xs text-slate-400">{getSortMarker('symbol')}</span>
+                          </button>
+                        </th>
+                        <th className="px-4 py-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => toggleHoldingsSort('quantity')}
+                            className="inline-flex items-center gap-2 transition hover:text-white"
+                          >
+                            <span>Quantity</span>
+                            <span className="text-xs text-slate-400">{getSortMarker('quantity')}</span>
+                          </button>
+                        </th>
+                        <th className="px-4 py-3 font-medium text-right">
+                          <button
+                            type="button"
+                            onClick={() => toggleHoldingsSort('value')}
+                            className="inline-flex items-center gap-2 transition hover:text-white"
+                          >
+                            <span>Value</span>
+                            <span className="text-xs text-slate-400">{getSortMarker('value')}</span>
+                          </button>
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10 text-slate-100">
-                      {holdings.map(([symbol, quantity]) => (
-                        <tr key={symbol}>
-                          <td className="px-4 py-3 font-medium">{symbol}</td>
-                          <td className="px-4 py-3">{quantity}</td>
-                        </tr>
-                      ))}
+                      {holdings.map(([symbol, quantity]) => {
+                        const posVal = portfolioValue?.positionValues?.[symbol]
+                        return (
+                          <tr key={symbol}>
+                            <td className="px-4 py-3 font-medium">{symbol}</td>
+                            <td className="px-4 py-3">{quantity}</td>
+                            <td className="px-4 py-3 text-right tabular-nums">
+                              {posVal !== undefined
+                                ? formatCurrency(posVal, displayCurrency, usdSgdRate)
+                                : <span className="text-slate-500">—</span>}
+                            </td>
+                          </tr>
+                        )
+                      })}
                       {holdings.length === 0 && (
                         <tr>
-                          <td colSpan={2} className="px-4 py-6 text-center text-slate-400">
+                          <td colSpan={3} className="px-4 py-6 text-center text-slate-400">
                             No holdings
                           </td>
                         </tr>
@@ -656,7 +834,24 @@ function App() {
               </label>
             </div>
 
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className="flex overflow-hidden rounded-full border border-white/15 bg-slate-900/60 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setDisplayCurrency('USD')}
+                  className={`px-3 py-1.5 transition ${displayCurrency === 'USD' ? 'bg-cyan-300 text-slate-950' : 'text-slate-100 hover:bg-white/10'}`}
+                >
+                  USD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDisplayCurrency('SGD')}
+                  className={`px-3 py-1.5 transition ${displayCurrency === 'SGD' ? 'bg-cyan-300 text-slate-950' : 'text-slate-100 hover:bg-white/10'}`}
+                >
+                  SGD
+                </button>
+              </div>
+              <div className="h-4 w-px bg-white/15" />
               {TIMEFRAME_OPTIONS.map((option) => (
                 <button
                   key={option.value}
@@ -676,20 +871,43 @@ function App() {
             {portfolioValue ? (
               <div className="mt-5 space-y-5">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-xl bg-white/95 p-4 text-slate-950">
-                    <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Holdings Value</p>
-                    <p className="mt-2 text-xl font-semibold">{formatCurrency(portfolioValue.holdingsValue)}</p>
+                  <div
+                    className={`rounded-xl bg-white/95 p-4 text-slate-950 cursor-pointer select-none transition-all ${selectedChart === 'holdings' ? 'ring-2 ring-teal-500' : 'opacity-85 hover:opacity-100'}`}
+                    onClick={() => setSelectedChart('holdings')}
+                    title="Click to view holdings chart"
+                  >
+                    <MetricLabel
+                      label="Holdings Value"
+                      tooltip="Current market value of your holdings for the selected timeframe, shown in your chosen display currency."
+                    />
+                    <p className="mt-2 text-xl font-semibold">{formatCurrency(portfolioValue.holdingsValue, displayCurrency, usdSgdRate)}</p>
+                    {displayCurrency === 'SGD' && usdSgdRate && (
+                      <p className="mt-1 text-xs text-slate-400">1 USD = {usdSgdRate.toFixed(4)} SGD</p>
+                    )}
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Total Return</p>
+                    <MetricLabel
+                      label="Total Return"
+                      tooltip="Simple change from first to last portfolio value in the selected timeframe. This is not cash-flow adjusted."
+                    />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.totalReturn)}</p>
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <p className="text-xs uppercase tracking-[0.16em] text-slate-400">TWR</p>
+                  <div
+                    className={`rounded-xl border p-4 text-white cursor-pointer select-none transition-all ${selectedChart === 'twr' ? 'border-indigo-400/60 bg-indigo-500/20 ring-2 ring-indigo-400' : 'border-white/10 bg-white/5 opacity-85 hover:opacity-100'}`}
+                    onClick={() => setSelectedChart('twr')}
+                    title="Click to view TWR chart"
+                  >
+                    <MetricLabel
+                      label="TWR"
+                      tooltip="Time-Weighted Return. Measures investment performance excluding the impact of deposits and withdrawals."
+                    />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.twr)}</p>
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <p className="text-xs uppercase tracking-[0.16em] text-slate-400">IRR</p>
+                    <MetricLabel
+                      label="IRR"
+                      tooltip="Money-Weighted Return (XIRR). Includes timing and size of deposits and withdrawals to reflect your personal return."
+                    />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.irr)}</p>
                   </div>
                 </div>
@@ -700,7 +918,14 @@ function App() {
                   </div>
                 )}
 
-                <ValueChart series={portfolioValue.series} timeframe={portfolioValue.timeframe} />
+                <ValueChart
+                  series={portfolioValue.series}
+                  timeframe={portfolioValue.timeframe}
+                  displayCurrency={displayCurrency}
+                  usdSgdRate={usdSgdRate}
+                  mode={selectedChart}
+                  twrSeries={portfolioValue.twrSeries}
+                />
               </div>
             ) : (
               <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/5 p-5 text-sm text-slate-300">

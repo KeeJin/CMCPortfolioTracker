@@ -19,38 +19,40 @@ NOT on visual design or styling details.
 * UI reflects backend state (no hidden logic)
 * Always show source of truth (baseline + transactions)
 * Surface warnings explicitly (never hide inconsistencies)
-* Prefer clarity over aesthetics
+* Uploads are actions, not a required sequence
+* The dashboard should feel polished, calm, and modern without hiding state
 
 ---
 
 ## 1. Main Views
 
-The application consists of 3 primary views:
+The application is a single dashboard with 4 persistent areas:
 
 ---
 
-### 1. Upload View
+### 1. Action Panel
 
 Purpose:
 
-* ingest new data into the system
+* ingest new data into the system at any time
 
 ---
 
 #### Components
 
-* Upload Baseline
-* Upload Transactions
-* Upload Status
+* Add Baseline action card
+* Add Transactions action card
+* Inline action result / error states
 
 ---
 
 #### Behavior
 
-##### Upload Baseline
+##### Add Baseline
 
 * User selects file
 * Sends `POST /api/baseline`
+* File is uploaded as multipart form-data
 * On success:
 
   * show baseline date
@@ -58,10 +60,11 @@ Purpose:
 
 ---
 
-##### Upload Transactions
+##### Add Transactions
 
 * User selects file
 * Sends `POST /api/transactions`
+* File is uploaded as multipart form-data
 * On success:
 
   * show:
@@ -84,7 +87,19 @@ Upload failed: <error message>
 
 ---
 
-## 2. Portfolio View
+### Sequence Rule
+
+The UI must NOT imply:
+
+* baseline first, transactions second
+* transactions are invalid before a baseline exists
+* only one baseline matters
+
+The UI must instead present uploads as independent actions that modify the overall portfolio history.
+
+---
+
+## 2. Current State Panel
 
 Purpose:
 
@@ -102,9 +117,16 @@ GET /api/portfolio
 
 ### Display
 
+* Anchor mode (`BASELINE` or `TRANSACTIONS_ONLY`)
 * Baseline date
 * Number of transactions applied
-* Holdings (symbol + quantity)
+* Total baselines stored
+* Total transactions stored
+* Holdings table with:
+
+  * symbol
+  * quantity
+  * latest position value
 * Cash balance
 
 ---
@@ -129,6 +151,11 @@ Display prominently:
 * Do NOT compute anything in frontend
 * Display values exactly as returned
 * Sort holdings alphabetically by symbol
+* Quantity must come from `GET /api/portfolio` reconstructed holdings state
+* Position value must come from `GET /api/portfolio/value` `positionValues[symbol]`
+* If a market split changed holdings, the updated quantity must be shown without frontend adjustment logic
+* User can sort the holdings table by symbol, quantity, or position value
+* Re-clicking the active column toggles ascending/descending order
 
 ---
 
@@ -157,13 +184,22 @@ GET /api/portfolio/value
 * TWR
 * IRR
 
+Behavior:
+
+* Holdings Value card is selectable and switches the chart to holdings mode
+* TWR card is selectable and switches the chart to TWR mode
+* Total Return and IRR are summary-only cards
+
 ---
 
 #### Time Series Chart
 
-Plot:
+Plot one of:
 
-* portfolio total value over time
+* holdings value over time
+* cumulative TWR over time
+
+Chart mode depends on the selected metric card.
 
 ---
 
@@ -172,7 +208,7 @@ Plot:
 Always display:
 
 ```text
-Pricing Method: transaction_price_history_forward_fill
+Pricing Method: <active pricing source>
 ```
 
 ---
@@ -180,8 +216,8 @@ Pricing Method: transaction_price_history_forward_fill
 #### Explanation Tooltip
 
 ```text
-Prices are derived from your transaction history and forward-filled.
-Portfolio value may appear flat between trades.
+Prices are derived from the selected pricing source.
+Yahoo Finance mode also enriches the portfolio with stock split history before calculating holdings and value.
 ```
 
 ---
@@ -199,6 +235,8 @@ Display warning:
 ```text
 Missing price data for: <symbols>
 ```
+
+If `positionValues[symbol]` is missing for a holding, display `—` in the value column.
 
 ---
 
@@ -235,6 +273,43 @@ Display:
 ```text
 Significant mismatch detected between expected and actual holdings.
 ```
+
+---
+
+## 5. History / Lineage View
+
+Purpose:
+
+* show how portfolio state has been built over time
+* make uploads feel like a timeline of actions rather than a wizard
+
+### Data Source
+
+```http
+GET /api/portfolio/history
+```
+
+### Display
+
+* action timeline in reverse chronological order
+* chronological list of baselines
+* active anchor type and date
+* upload metadata:
+
+  * filename / source
+  * upload timestamp
+  * coverage range when available
+  * reconciliation status for baseline actions
+  * imported / duplicate / parse error counts for transaction actions
+
+### UX Goal
+
+The history panel should feel closer to a lightweight git graph than a checklist.
+It should help the user understand:
+
+* what happened
+* when it happened
+* which baseline currently anchors reconstruction
 
 ---
 

@@ -1,49 +1,77 @@
 import { Router } from "express";
+import multer from "multer";
 import { parseBaselineText } from "../parsers/baseline.js";
-import { setBaseline, getBaseline } from "../store.js";
+import { setBaseline, getAllBaselines, getAllTransactions, recordUpload } from "../store.js";
 import { randomUUID } from "crypto";
+import { reconcileBaseline } from "../reconciliation.js";
+import { findPreviousBaseline } from "../portfolioState.js";
+import { extractTextFromUploadedFile } from "../parsers/upload.js";
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
 // POST /api/baseline
 //
-// Accepts a JSON body:
-//   { text: string, source?: string }
-//
-// `text` is the raw extracted text from a portfolio report PDF
-// (pdftotext -layout output). No file upload at this stage.
+// Accepts a multipart upload containing the baseline PDF.
 
-router.post("/", (req, res) => {
-  const body = req.body as { text?: unknown; source?: unknown };
-
-  if (typeof body.text !== "string" || body.text.trim() === "") {
-    res.status(400).json({ error: "body.text must be a non-empty string" });
+router.post("/", upload.single("file"), async (req, res) => {
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "multipart field 'file' is required" });
     return;
   }
 
-  const source = typeof body.source === "string" ? body.source : "";
+  const source = file.originalname || "baseline-upload";
   const id = randomUUID();
 
-  const result = parseBaselineText(body.text, id, source);
+  let text: string;
+
+  try {
+    text = await extractTextFromUploadedFile(file);
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : "Failed to read upload" });
+    return;
+  }
+
+  const result = parseBaselineText(text, id, source);
 
   if (!result.ok) {
     res.status(422).json({ error: result.error.reason });
     return;
   }
 
-  setBaseline(result.baseline);
+  const previousBaseline = findPreviousBaseline(getAllBaselines(), result.baseline);
+  const reconciliation = previousBaseline
+    ? reconcileBaseline(previousBaseline, result.baseline, getAllTransactions())
+    : undefined;
 
-  res.status(200).json({ baseline: result.baseline });
+  setBaseline(result.baseline);
+  recordUpload({
+    id: randomUUID(),
+    type: "BASELINE",
+    filename: source || `baseline-${result.baseline.date}`,
+    uploadedAt: new Date().toISOString(),
+    dateRange: {
+      start: result.baseline.date,
+      end: result.baseline.date,
+    },
+    metadata: {
+      baselineDate: result.baseline.date,
+      reconciliationStatus: reconciliation?.status,
+    },
+  });
+
+  res.status(200).json({ baseline: result.baseline, reconciliation });
 });
 
 // GET /api/baseline — useful for verifying stored state
 router.get("/", (_req, res) => {
-  const b = getBaseline();
-  if (!b) {
-    res.status(404).json({ error: "No baseline stored" });
+  const baselines = getAllBaselines();
+  if (baselines.length === 0) {
+    res.status(404).json({ error: "No baselines stored" });
     return;
   }
-  res.status(200).json({ baseline: b });
+  res.status(200).json({ baselines });
 });
 
 export default router;

@@ -38,6 +38,8 @@ Where:
 * `price_i(t)` = market price at time `t`
 * `cash(t)` = cash balance at time `t`
 
+`shares_i(t)` must already reflect any stock split events that occurred on or before `t`.
+
 ---
 
 ## 2. Market Data Requirement
@@ -49,6 +51,7 @@ Requirements:
 * Daily closing prices are sufficient
 * Prices must align with transaction dates
 * Missing prices should be handled gracefully
+* Corporate actions that change quantity must be applied separately from price history
 
 ---
 
@@ -88,6 +91,8 @@ For each date in range:
 3. Fetch prices
 4. Compute value
 
+This transaction stream includes split events, so holdings quantities and position values remain correct after a stock split.
+
 ---
 
 ## 4. Cash Flow Classification
@@ -104,6 +109,7 @@ Cash flows must be separated into:
 * BUY
 * SELL
 * DIVIDEND
+* SPLIT
 
 ---
 
@@ -116,6 +122,7 @@ Cash flows must be separated into:
 | DIVIDEND   | Yes           | Yes                 |
 | DEPOSIT    | Yes           | No                  |
 | WITHDRAWAL | Yes           | No                  |
+| SPLIT      | Yes           | No                  |
 
 ---
 
@@ -161,6 +168,21 @@ TWR = (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
 * Ignore DEPOSIT/WITHDRAWAL as performance
 * Include DIVIDENDS as performance
 * Use portfolio value before and after each cash flow
+* Do NOT treat SPLIT as an external cash flow
+
+### Timeframe-Specific TWR and IRR
+
+When the API returns a timeframe-specific chart:
+
+* first build performance on the full underlying history
+* then sample the value series for the requested timeframe
+* then filter deposit/withdrawal cash flows to that sampled date range
+* finally compute TWR and IRR for that timeframe only
+
+This avoids two known errors:
+
+* metrics becoming identical to naive total return because deposit/withdrawal dates were lost during sampling
+* metrics staying constant across all timeframes because cash flows were not filtered to the selected range
 
 ---
 
@@ -205,6 +227,7 @@ Solve for `r`.
 * Use XIRR (date-aware IRR)
 * Include ALL external cash flows
 * Final portfolio value is treated as positive cash flow
+* Do NOT include SPLIT as a cash flow
 
 ---
 

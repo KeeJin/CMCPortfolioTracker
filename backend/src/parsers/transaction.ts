@@ -32,6 +32,7 @@ export function classifyTransactionType(
   if (description.includes("Intl Div")) return "DIVIDEND";
   if (description.includes("Dep CHASSGSG")) return "DEPOSIT";
   if (description.includes("Wdl CHASSGSG")) return "WITHDRAWAL";
+  if (description.toUpperCase().includes("SPLIT")) return "SPLIT";
   return "UNKNOWN";
 }
 
@@ -59,9 +60,44 @@ export function extractQuantity(description: string): number | null {
 // Number after "@" in description.
 
 export function extractPrice(description: string): number | null {
-  const match = description.match(/@\s*(\d+(?:\.\d+)?)/);
+  const match = description.match(/@\s*([\d,\s]+\.\d+)/);
   if (!match) return null;
-  const value = parseFloat(match[1] ?? "");
+  const value = parseFloat((match[1] ?? "").replace(/[\s,]+/g, ""));
+  return isNaN(value) ? null : value;
+}
+
+// ─── Step 5b: Extract split ratio ─────────────────────────────────────────────
+// Matches patterns like "20:1", "20 for 1", "1 for 20", etc.
+
+export function extractSplitRatio(description: string): number | null {
+  // Try "X:Y" format (e.g., "20:1")
+  const colonMatch = description.match(/(\d+):(\d+)/);
+  if (colonMatch) {
+    const numerator = parseInt(colonMatch[1] ?? "0", 10);
+    const denominator = parseInt(colonMatch[2] ?? "1", 10);
+    if (denominator !== 0) {
+      return numerator / denominator;
+    }
+  }
+
+  // Try "X for Y" or "X to Y" format (e.g., "20 for 1", "1 for 20")
+  const forMatch = description.match(/(\d+)\s+(?:for|to)\s+(\d+)/i);
+  if (forMatch) {
+    const numerator = parseInt(forMatch[1] ?? "0", 10);
+    const denominator = parseInt(forMatch[2] ?? "1", 10);
+    if (denominator !== 0) {
+      return numerator / denominator;
+    }
+  }
+
+  return null;
+}
+
+function parseAmountCell(cell: string): number | null {
+  const normalized = cell.replace(/Cr$/i, "").replace(/[\s,]+/g, "").trim();
+  if (!normalized) return null;
+
+  const value = parseFloat(normalized);
   return isNaN(value) ? null : value;
 }
 
@@ -92,44 +128,84 @@ export function parseRawRow(rawText: string): RawTransactionRow | null {
 
   const date = dateMatch[1] as string;
   const rest = trimmed.slice(dateMatch[0].length);
+  let columns = rest
+    .split(/\s{2,}/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
 
-  // Next token is the reference ID (numeric)
-  const refMatch = rest.match(/^(\S+)\s+/);
-  if (!refMatch) return null;
+  if (columns.length < 2) {
+    const refMatch = rest.match(/^(\S+)\s+/);
+    if (!refMatch) return null;
 
-  const reference = refMatch[1] as string;
-  const afterRef = rest.slice(refMatch[0].length);
+    const reference = refMatch[1] as string;
+    if (!/^\d+$/.test(reference)) {
+      return null;
+    }
 
-  // Trailing number columns are debit/credit values (may include commas).
-  // We extract up to two trailing numbers and treat the middle as description.
-  const numberPattern = /[\d,]+\.\d+/g;
-  const numbers = [...afterRef.matchAll(numberPattern)].map((m) => ({
-    value: parseFloat((m[0] as string).replace(/,/g, "")),
-    index: m.index as number,
-  }));
+    const afterRef = rest.slice(refMatch[0].length);
+    const numberPattern = /[\d,]+\.\d+/g;
+    const numbers = [...afterRef.matchAll(numberPattern)].map((match) => ({
+      value: parseFloat((match[0] as string).replace(/,/g, "")),
+      index: match.index as number,
+    }));
 
-  let debit: number | null = null;
-  let credit: number | null = null;
-  let descriptionEnd = afterRef.length;
+    if (numbers.length === 0) {
+      return null;
+    }
 
-  if (numbers.length >= 2) {
-    // Last two numbers are the amount columns; description is everything before
-    const last = numbers[numbers.length - 1]!;
-    const secondLast = numbers[numbers.length - 2]!;
-    descriptionEnd = secondLast.index;
-    // The second-to-last column is the transaction amount (debit or credit);
-    // the last column is the running balance — we don't store it.
-    debit = secondLast.value;
-    credit = null; // resolved in context; we carry raw value for now
-    void last; // running balance, ignored
-  } else if (numbers.length === 1) {
-    descriptionEnd = numbers[0]!.index;
-    debit = numbers[0]!.value;
+    const amountEntry = numbers.length >= 2 ? numbers[numbers.length - 2]! : numbers[0]!;
+    const description = afterRef.slice(0, amountEntry.index).trim();
+    const type = classifyTransactionType(description);
+
+    let debit: number | null = null;
+    let credit: number | null = null;
+
+    if (type === "BUY" || type === "WITHDRAWAL") {
+      debit = amountEntry.value;
+    } else {
+      credit = amountEntry.value;
+    }
+
+    return { date, reference, description, debit, credit };
   }
 
-  const description = afterRef.slice(0, descriptionEnd).trim();
+  const reference = columns[0] as string;
+  if (!/^\d+$/.test(reference)) {
+    return null;
+  }
+
+  const description = columns[1] as string;
+  const amount = parseAmountCell(columns[2] ?? "");
+  if (amount === null) {
+    return null;
+  }
+
+  const type = classifyTransactionType(description);
+  let debit: number | null = null;
+  let credit: number | null = null;
+
+  if (type === "BUY" || type === "WITHDRAWAL") {
+    debit = amount;
+  } else {
+    credit = amount;
+  }
 
   return { date, reference, description, debit, credit };
+}
+
+export function parseTransactionStatementText(text: string): RawTransactionRow[] {
+  const rows: RawTransactionRow[] = [];
+
+  for (const line of text.split("\n")) {
+    const row = parseRawRow(line);
+    if (!row) {
+      continue;
+    }
+
+    rows.push(row);
+  }
+
+  return rows;
 }
 
 // ─── Main entry point: parse a single statement row ──────────────────────────
@@ -174,7 +250,10 @@ export function parseTransactionRow(
 
   // Step 3 — symbol
   const symbol = extractSymbol(row.description);
-  if (symbol === null && (type === "BUY" || type === "SELL" || type === "DIVIDEND")) {
+  if (
+    symbol === null &&
+    (type === "BUY" || type === "SELL" || type === "DIVIDEND" || type === "SPLIT")
+  ) {
     console.error("MISSING SYMBOL FOR", type, { row });
     return {
       ok: false,
@@ -190,8 +269,18 @@ export function parseTransactionRow(
   const price =
     type === "BUY" || type === "SELL" ? extractPrice(row.description) : null;
 
+  // Step 5b — split ratio (SPLIT only)
+  const splitRatio = type === "SPLIT" ? extractSplitRatio(row.description) : null;
+
   // Step 6 — amount
-  const amount = calculateAmount(row.debit, row.credit);
+  // For SPLIT transactions, amount should be 0 (no cash impact)
+  let amount: number | null;
+  if (type === "SPLIT") {
+    amount = 0;
+  } else {
+    amount = calculateAmount(row.debit, row.credit);
+  }
+
   if (amount === null) {
     return {
       ok: false,
@@ -213,6 +302,7 @@ export function parseTransactionRow(
     quantity,
     price,
     amount,
+    splitRatio,
     source,
   };
 

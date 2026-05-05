@@ -1,12 +1,45 @@
 import type { NormalizedTransaction } from "./models/index.js";
 import type { Baseline } from "./models/index.js";
+import type { Upload } from "./models/index.js";
+import { readJson, writeJson } from "./persistence.js";
 
 // ─── In-memory store ──────────────────────────────────────────────────────────
 // Keyed by transaction ID for O(1) deduplication.
-// A single baseline is kept; a new POST replaces it.
+// Baselines and upload actions are append-only.
 
 const transactions = new Map<string, NormalizedTransaction>();
-let baseline: Baseline | null = null;
+const baselines: Baseline[] = [];
+const uploads: Upload[] = [];
+
+// ─── Persistence ──────────────────────────────────────────────────────────────
+
+function saveStore(): void {
+  writeJson("baselines.json", baselines);
+  writeJson("transactions.json", Array.from(transactions.values()));
+  writeJson("uploads.json", uploads);
+}
+
+// Loads persisted data from disk into the in-memory store.
+// Must be called once at server startup before handling any requests.
+export function initStore(): void {
+  const savedBaselines = readJson<Baseline[]>("baselines.json", []);
+  const savedTransactions = readJson<NormalizedTransaction[]>("transactions.json", []);
+  const savedUploads = readJson<Upload[]>("uploads.json", []);
+
+  for (const b of savedBaselines) {
+    baselines.push(b);
+  }
+  for (const tx of savedTransactions) {
+    transactions.set(tx.id, tx);
+  }
+  for (const u of savedUploads) {
+    uploads.push(u);
+  }
+
+  console.log(
+    `[store] Loaded from disk: ${baselines.length} baselines, ${transactions.size} transactions, ${uploads.length} uploads`
+  );
+}
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
@@ -26,6 +59,10 @@ export function addTransactions(incoming: NormalizedTransaction[]): {
     }
   }
 
+  if (added > 0) {
+    saveStore();
+  }
+
   return { added, duplicates };
 }
 
@@ -35,14 +72,42 @@ export function getAllTransactions(): NormalizedTransaction[] {
 
 export function clearTransactions(): void {
   transactions.clear();
+  saveStore();
 }
 
 // ─── Baseline ─────────────────────────────────────────────────────────────────
 
 export function setBaseline(b: Baseline): void {
-  baseline = b;
+  baselines.push(b);
+  saveStore();
 }
 
 export function getBaseline(): Baseline | null {
-  return baseline;
+  if (baselines.length === 0) {
+    return null;
+  }
+
+  let latest = baselines[0]!;
+
+  for (let index = 1; index < baselines.length; index += 1) {
+    const candidate = baselines[index]!;
+    if (candidate.date >= latest.date) {
+      latest = candidate;
+    }
+  }
+
+  return latest;
+}
+
+export function getAllBaselines(): Baseline[] {
+  return [...baselines];
+}
+
+export function recordUpload(upload: Upload): void {
+  uploads.push(upload);
+  saveStore();
+}
+
+export function getUploads(): Upload[] {
+  return [...uploads];
 }

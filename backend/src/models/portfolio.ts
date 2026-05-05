@@ -6,7 +6,6 @@ export type PortfolioState = {
 
 export type PortfolioValuePoint = {
   date: string; // ISO format: YYYY-MM-DD
-  totalValue: number; // holdings + cash (SGD)
+  totalValue: number; // holdings-only portfolio value (SGD)
   holdingsValue: number; // (SGD)
-  cash: number; // (SGD)
 };

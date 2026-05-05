@@ -48,7 +48,7 @@ POST /api/baseline
 * Content-Type: `multipart/form-data`
 * Body:
 
-  * file (PDF or CSV)
+  * `file` → portfolio report PDF
 
 #### Behavior
 
@@ -88,13 +88,15 @@ GET /api/baseline
 #### Response
 
 ```json id="baseline_list"
-[
-  {
-    "id": "string",
-    "date": "2026-01-01",
-    "cash": 5890.15
-  }
-]
+{
+  "baselines": [
+    {
+      "id": "string",
+      "date": "2026-01-01",
+      "cash": 5890.15
+    }
+  ]
+}
 ```
 
 ---
@@ -112,7 +114,7 @@ POST /api/transactions
 * Content-Type: `multipart/form-data`
 * Body:
 
-  * file (PDF or CSV)
+  * `file` → transaction statement PDF
 
 ---
 
@@ -129,8 +131,9 @@ POST /api/transactions
 
 ```json id="tx_response"
 {
-  "imported": 42,
-  "duplicatesIgnored": 10,
+  "added": 42,
+  "duplicates": 10,
+  "parseErrors": 0,
   "errors": []
 }
 ```
@@ -177,8 +180,10 @@ GET /api/portfolio
 
 #### Behavior
 
-* Use latest baseline
-* Apply all transactions after baseline
+* Use the latest authoritative baseline if one exists
+* Otherwise use a synthetic transactions-only anchor
+* Enrich the post-baseline transaction stream with fetched market stock splits
+* Apply all transactions after the active anchor
 * Return current state
 
 ---
@@ -187,12 +192,21 @@ GET /api/portfolio
 
 ```json id="portfolio_response"
 {
-  "date": "2026-03-25",
-  "holdings": {
-    "AMZN": 138,
-    "NVDA": 222
+  "anchorType": "BASELINE",
+  "baselineDate": "2026-03-01",
+  "baselinesStored": 2,
+  "transactionsStored": 48,
+  "transactionsApplied": 9,
+  "state": {
+    "date": "2026-04-21",
+    "holdings": {
+      "AMZN": 138,
+      "NVDA": 222,
+      "VGT": 80
+    },
+    "cash": 5200.50
   },
-  "cash": 5200.50
+  "warnings": []
 }
 ```
 
@@ -206,8 +220,27 @@ GET /api/portfolio/value
 
 #### Query Parameters
 
-* `startDate`
-* `endDate`
+* `timeframe` (optional)
+* `pricingMethod` (optional)
+
+Allowed values:
+
+* `transaction_forward_fill`
+* `google_finance` (fetches latest quote pages from Google Finance and blends into current-day valuation)
+* `stooq_free_live` (fetches latest free quotes from Stooq and blends into current-day valuation)
+* `yahoo_finance` (fetches historical prices, live prices, and stock split history from Yahoo Finance)
+
+Allowed timeframes:
+
+* `5d`
+* `1m`
+* `3m`
+* `6m`
+* `ytd`
+* `1y`
+* `3y`
+* `5y`
+* `all`
 
 ---
 
@@ -215,13 +248,68 @@ GET /api/portfolio/value
 
 ```json id="portfolio_series_resp"
 {
+  "date": "2026-05-05",
+  "holdingsValue": 173983.96,
+  "totalValue": 173983.96,
+  "startDate": "2025-01-31",
+  "endDate": "2026-05-05",
+  "totalReturn": 1.5182,
+  "twr": 1.5193,
+  "irr": 2.1540,
+  "pricingMethod": "yahoo_finance",
+  "timeframe": "all",
+  "livePriceFetch": {
+    "fetchedSymbols": ["AMZN", "MSFT"],
+    "failedSymbols": ["GRNY"]
+  },
+  "positionValues": {
+    "AMZN": 14873.22,
+    "VGT": 8521.60
+  },
+  "twrSeries": [1.0, 1.02, 1.05],
+  "missingPriceSymbols": [],
   "series": [
     {
       "date": "2026-01-01",
       "totalValue": 200000,
-      "cash": 5890
+      "holdingsValue": 194110
     }
   ]
+}
+```
+
+Notes:
+
+* `/api/portfolio` is the source of truth for holdings quantities shown in the UI table
+* `/api/portfolio/value` returns position-level market values used in that same table
+* both endpoints must use the same split-aware reconstructed holdings
+
+### Get Portfolio History
+
+```http
+GET /api/portfolio/history
+```
+
+#### Behavior
+
+* Return recorded upload actions in reverse chronological order
+* Return all stored baselines in chronological order
+* Return totals for uploads, baselines, and transactions
+* Return current active anchor type/date
+
+#### Response
+
+```json
+{
+  "anchorType": "BASELINE",
+  "currentAnchorDate": "2026-03-01",
+  "baselines": [],
+  "uploads": [],
+  "totals": {
+    "baselines": 2,
+    "transactions": 48,
+    "uploads": 5
+  }
 }
 ```
 

@@ -75,6 +75,18 @@ function collectDates(
     }
   }
 
+  // Always carry valuation forward to today so timeframe views (e.g. 1y)
+  // remain meaningful even when there were no new trades.
+  const today = new Date().toISOString().slice(0, 10);
+  let cursor = baselineDate;
+  while (cursor <= today) {
+    dateSet.add(cursor);
+
+    const value = new Date(`${cursor}T00:00:00.000Z`);
+    value.setUTCDate(value.getUTCDate() + 1);
+    cursor = value.toISOString().slice(0, 10);
+  }
+
   const dates = Array.from(dateSet);
   dates.sort((a, b) => {
     if (a < b) return -1;
@@ -88,12 +100,18 @@ function collectDates(
 function calculateHoldingsValue(
   holdings: Record<string, number>,
   date: string,
-  getPrice: PriceProvider
+  getPrice: PriceProvider,
+  baselineDate: string,
+  baselineHoldingPrices: Record<string, number> | undefined
 ): number {
   let holdingsValue = 0;
 
   for (const [symbol, shares] of Object.entries(holdings)) {
-    const price = getPrice(symbol, date);
+    let price = getPrice(symbol, date);
+    if (price === undefined && date === baselineDate && baselineHoldingPrices) {
+      price = baselineHoldingPrices[symbol];
+    }
+
     if (price === undefined) {
       continue;
     }
@@ -140,14 +158,19 @@ export function buildPortfolioValueSeries(
       txIndex += 1;
     }
 
-    const holdingsValue = calculateHoldingsValue(state.holdings, date, getPrice);
-    const totalValue = holdingsValue + state.cash;
+    const holdingsValue = calculateHoldingsValue(
+      state.holdings,
+      date,
+      getPrice,
+      baseline.date,
+      baseline.holdingPrices
+    );
+    const totalValue = holdingsValue;
 
     series.push({
       date,
       totalValue,
       holdingsValue,
-      cash: state.cash,
     });
   }
 
@@ -185,6 +208,57 @@ function sumExternalFlowsInRange(
   }
 
   return sum;
+}
+
+/**
+ * Computes the cumulative TWR factor at every point in the series.
+ * factors[0] = 1.0 (no return at start).
+ * factors[i] = compound product of all closed sub-period returns up to
+ * point i, multiplied by the open return from the last cash-flow boundary
+ * to point i.
+ *
+ * Sub-periods are closed whenever an external cash flow (DEPOSIT /
+ * WITHDRAWAL) falls on that date, exactly mirroring calculateTwr().
+ */
+export function buildTwrFactorSeries(
+  series: PortfolioValuePoint[],
+  transactions: NormalizedTransaction[]
+): number[] {
+  if (series.length === 0) return [];
+
+  const sortedTransactions = deduplicateAndSortTransactions(transactions);
+  const externalFlowByDate = buildExternalCashFlowMap(sortedTransactions);
+
+  const factors: number[] = new Array(series.length).fill(1);
+  let compounded = 1.0;
+  let periodStartIndex = 0;
+
+  for (let i = 0; i < series.length; i += 1) {
+    const startValue = series[periodStartIndex]!.totalValue;
+
+    if (startValue <= 0) {
+      // Cannot compute a meaningful return — carry forward the last factor.
+      factors[i] = compounded;
+    } else {
+      const externalCash = sumExternalFlowsInRange(
+        series,
+        periodStartIndex,
+        i,
+        externalFlowByDate
+      );
+      const endValue = series[i]!.totalValue;
+      const openPeriodReturn = (endValue - startValue - externalCash) / startValue;
+      factors[i] = compounded * (1 + openPeriodReturn);
+    }
+
+    // Close sub-period on every date that has an external cash flow.
+    if ((externalFlowByDate[series[i]!.date] ?? 0) !== 0) {
+      compounded = factors[i]!;
+      periodStartIndex = i;
+    }
+  }
+
+  return factors;
 }
 
 export function calculateTwr(

@@ -55,7 +55,7 @@ export type PortfolioValuePoint = {
   holdingsValue: number
 }
 
-export type PortfolioTimeframe = '5d' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y'
+export type PortfolioTimeframe = '5d' | '1m' | '3m' | '6m' | 'ytd' | '1y' | '3y' | '5y' | 'all'
 
 export type PortfolioValueResponse = {
   date: string
@@ -69,6 +69,11 @@ export type PortfolioValueResponse = {
   pricingMethod: string
   timeframe: PortfolioTimeframe
   series: PortfolioValuePoint[]
+  /** Cumulative TWR factor per series point. factor - 1 = return as decimal. */
+  twrSeries?: number[]
+  /** Latest market value per held symbol (symbol → USD value). */
+  positionValues?: Record<string, number>
+  usdSgdRate?: number | null
   missingPriceSymbols?: string[]
   livePriceFetch?: {
     fetchedSymbols: string[]
