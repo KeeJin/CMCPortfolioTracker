@@ -188,12 +188,13 @@ function getAnchorLabel(anchorType: PortfolioResponse['anchorType'] | PortfolioH
 async function getDashboardSnapshot(
   timeframe: PortfolioTimeframe,
   pricingMethod: PricingMethod,
+  includePreBaselineEstimates: boolean,
 ): Promise<DashboardSnapshot> {
   const history = await fetchPortfolioHistory()
 
   const [portfolioResult, portfolioValueResult] = await Promise.allSettled([
     fetchPortfolio(),
-    fetchPortfolioValue(timeframe, pricingMethod),
+    fetchPortfolioValue(timeframe, pricingMethod, includePreBaselineEstimates),
   ])
 
   return {
@@ -210,6 +211,7 @@ function ValueChart({
   usdSgdRate,
   mode = 'holdings',
   twrSeries,
+  benchmarkTwrSeries,
 }: {
   series?: PortfolioValuePoint[]
   timeframe: PortfolioTimeframe
@@ -217,6 +219,7 @@ function ValueChart({
   usdSgdRate?: number | null
   mode?: 'holdings' | 'twr'
   twrSeries?: number[]
+  benchmarkTwrSeries?: number[]
 }) {
   const safeSeries = Array.isArray(series) ? series : []
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
@@ -240,8 +243,16 @@ function ValueChart({
     ? twrSeries!.map((f) => f - 1)
     : safeSeries.map((p) => p.holdingsValue)
 
-  const minimum = Math.min(...yValues)
-  const maximum = Math.max(...yValues)
+  // Benchmark values overlaid only in TWR mode
+  const benchValues =
+    isTwr &&
+    Array.isArray(benchmarkTwrSeries) &&
+    benchmarkTwrSeries.length === safeSeries.length
+      ? benchmarkTwrSeries.map((f) => f - 1)
+      : []
+
+  const minimum = Math.min(...yValues, ...(benchValues.length ? benchValues : yValues))
+  const maximum = Math.max(...yValues, ...(benchValues.length ? benchValues : yValues))
   const range = Math.max(maximum - minimum, isTwr ? 0.001 : 1)
 
   const lineColor = isTwr ? '#6366f1' : '#0f766e'
@@ -347,6 +358,30 @@ function ValueChart({
           points={`${padding},${height - bottomPadding} ${points} ${width - padding},${height - bottomPadding}`}
         />
 
+        {/* Benchmark (VOO) overlay line — dashed amber, only in TWR mode */}
+        {benchValues.length > 0 && (
+          <polyline
+            fill="none"
+            stroke="#f59e0b"
+            strokeWidth="2"
+            strokeDasharray="6 3"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            points={benchValues
+              .map((v, i) => {
+                const x =
+                  padding +
+                  (i * (width - padding * 2)) / Math.max(safeSeries.length - 1, 1)
+                const y =
+                  height -
+                  bottomPadding -
+                  ((v - minimum) / range) * (height - padding - bottomPadding)
+                return `${x},${y}`
+              })
+              .join(' ')}
+          />
+        )}
+
         {pointsData.map((item) => {
           const isActive = item.index === activeIndex
           return (
@@ -394,10 +429,181 @@ function ValueChart({
         <span>{fmtAxisY(minimum)}</span>
         <span>{fmtAxisY(maximum)}</span>
       </div>
+      {benchValues.length > 0 && (
+        <div className="mt-2 flex items-center gap-4 text-xs text-slate-400">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-0.5 w-5 rounded bg-indigo-400" />
+            Portfolio
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5 rounded"
+              style={{ background: '#f59e0b', borderTop: '2px dashed #f59e0b' }}
+            />
+            VOO Benchmark
+          </span>
+        </div>
+      )}
     </div>
   )
 }
 
+
+function ContributionChart({
+  contributions,
+  displayCurrency,
+  usdSgdRate,
+  timeframe,
+}: {
+  contributions: Record<string, number>
+  displayCurrency: DisplayCurrency
+  usdSgdRate?: number | null
+  timeframe: string
+}) {
+  const entries = Object.entries(contributions)
+    .map(([symbol, value]) => ({ symbol, value }))
+    .sort((a, b) => b.value - a.value)
+
+  if (entries.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-white/15 bg-white/5 p-6 text-sm text-slate-400">
+        No contribution data available.
+      </div>
+    )
+  }
+
+  const maxAbs = Math.max(...entries.map((e) => Math.abs(e.value)), 1)
+  const totalGain = entries.reduce((s, e) => (e.value > 0 ? s + e.value : s), 0)
+  const totalLoss = entries.reduce((s, e) => (e.value < 0 ? s + e.value : s), 0)
+
+  const ROW_H = 36
+  const LABEL_W = 68
+  const VALUE_W = 100
+  const BAR_AREA = 360
+  const svgWidth = LABEL_W + BAR_AREA + VALUE_W
+  const svgHeight = entries.length * ROW_H + 8
+
+  function barWidth(value: number) {
+    return (Math.abs(value) / maxAbs) * (BAR_AREA / 2 - 4)
+  }
+
+  const midX = LABEL_W + BAR_AREA / 2
+
+  function fmtContrib(v: number) {
+    const converted = displayCurrency === 'SGD' && usdSgdRate ? v * usdSgdRate : v
+    const sign = v > 0 ? '+' : v < 0 ? '-' : ''
+    return `${sign}${new Intl.NumberFormat(displayCurrency === 'SGD' ? 'en-SG' : 'en-US', {
+      style: 'currency',
+      currency: displayCurrency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(Math.abs(converted))}`
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Summary strip */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-xl bg-white/95 p-3 text-slate-950">
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Positions</p>
+          <p className="mt-1 text-lg font-semibold">{entries.length}</p>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Winners</p>
+          <p className="mt-1 text-lg font-semibold text-emerald-400">
+            {entries.filter((e) => e.value > 0).length}
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Losers</p>
+          <p className="mt-1 text-lg font-semibold text-rose-400">
+            {entries.filter((e) => e.value < 0).length}
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Net ({timeframe.toUpperCase()})</p>
+          <p className={`mt-1 text-lg font-semibold ${totalGain + totalLoss >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {fmtContrib(totalGain + totalLoss)}
+          </p>
+        </div>
+      </div>
+
+      {/* Horizontal bar chart */}
+      <div className="overflow-x-auto rounded-2xl border border-white/10 bg-white/3 p-4">
+        <svg
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          className="w-full"
+          style={{ minWidth: `${svgWidth}px`, height: `${svgHeight}px` }}
+        >
+          {/* Centre line */}
+          <line
+            x1={midX}
+            x2={midX}
+            y1={0}
+            y2={svgHeight}
+            stroke="#475569"
+            strokeOpacity="0.4"
+            strokeWidth="1"
+          />
+
+          {entries.map((entry, i) => {
+            const y = i * ROW_H + 4
+            const isGain = entry.value >= 0
+            const bw = barWidth(entry.value)
+            const barX = isGain ? midX : midX - bw
+            const fill = isGain ? '#10b981' : '#f43f5e'
+            const fillOp = isGain ? '0.75' : '0.7'
+
+            return (
+              <g key={entry.symbol}>
+                {/* Symbol label */}
+                <text
+                  x={LABEL_W - 8}
+                  y={y + ROW_H / 2 + 4}
+                  textAnchor="end"
+                  fontSize="12"
+                  fontWeight="600"
+                  fill="#e2e8f0"
+                >
+                  {entry.symbol}
+                </text>
+
+                {/* Bar */}
+                <rect
+                  x={barX}
+                  y={y + 6}
+                  width={Math.max(bw, 2)}
+                  height={ROW_H - 12}
+                  rx="3"
+                  fill={fill}
+                  fillOpacity={fillOp}
+                />
+
+                {/* Value label */}
+                <text
+                  x={LABEL_W + BAR_AREA + 6}
+                  y={y + ROW_H / 2 + 4}
+                  textAnchor="start"
+                  fontSize="11"
+                  fontWeight="500"
+                  fill={isGain ? '#34d399' : '#fb7185'}
+                >
+                  {fmtContrib(entry.value)}
+                </text>
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+
+      {/* Gain / loss totals */}
+      <div className="flex justify-between text-xs text-slate-400 px-1">
+        <span className="text-rose-400">Losses: {fmtContrib(totalLoss)}</span>
+        <span className="text-emerald-400">Gains: {fmtContrib(totalGain)}</span>
+      </div>
+    </div>
+  )
+}
 
 function UploadModal({
   open,
@@ -439,6 +645,7 @@ function UploadModal({
 function App() {
   const [timeframe, setTimeframe] = useState<PortfolioTimeframe>('1y')
   const [pricingMethod, setPricingMethod] = useState<PricingMethod>('yahoo_finance')
+  const [includePreBaselineEstimates, setIncludePreBaselineEstimates] = useState(true)
   const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency>('USD')
   const [selectedChart, setSelectedChart] = useState<'holdings' | 'twr'>('holdings')
   const [baselineFile, setBaselineFile] = useState<File | null>(null)
@@ -454,8 +661,8 @@ function App() {
   const [baselineModalOpen, setBaselineModalOpen] = useState(false)
   const [transactionsModalOpen, setTransactionsModalOpen] = useState(false)
   const [holdingsSort, setHoldingsSort] = useState<{ key: HoldingsSortKey; direction: SortDirection }>({
-    key: 'symbol',
-    direction: 'asc',
+    key: 'value',
+    direction: 'desc',
   })
 
   function toggleHoldingsSort(key: HoldingsSortKey) {
@@ -484,7 +691,11 @@ function App() {
     setPortfolioError(null)
 
     try {
-      const snapshot = await getDashboardSnapshot(timeframe, pricingMethod)
+      const snapshot = await getDashboardSnapshot(
+        timeframe,
+        pricingMethod,
+        includePreBaselineEstimates,
+      )
       setHistory(snapshot.history)
       setPortfolio(snapshot.portfolio)
       setPortfolioValue(snapshot.portfolioValue)
@@ -502,8 +713,13 @@ function App() {
     let cancelled = false
 
     async function loadInitialDashboard() {
+      setPortfolioLoading(true)
       try {
-        const snapshot = await getDashboardSnapshot(timeframe, pricingMethod)
+        const snapshot = await getDashboardSnapshot(
+          timeframe,
+          pricingMethod,
+          includePreBaselineEstimates,
+        )
 
         if (cancelled) {
           return
@@ -534,7 +750,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [timeframe, pricingMethod])
+  }, [timeframe, pricingMethod, includePreBaselineEstimates])
 
   async function handleBaselineSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -706,20 +922,14 @@ function App() {
               </button>
             </div>
 
-            {portfolioLoading && (
-              <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-                Loading portfolio...
-              </div>
-            )}
-
             {!portfolioLoading && portfolioError && (
               <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
                 {portfolioError}
               </div>
             )}
 
-            {!portfolioLoading && !portfolioError && portfolio && (
-              <div className="space-y-4">
+            {!portfolioError && portfolio && (
+              <div className={`space-y-4 transition-all duration-150 ${portfolioLoading ? 'pointer-events-none opacity-30 blur-[1px]' : ''}`}>
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl bg-white/95 p-4 text-slate-950">
                     <p className="text-xs uppercase tracking-[0.16em] text-slate-500">State Date</p>
@@ -866,10 +1076,48 @@ function App() {
                   {option.label}
                 </button>
               ))}
+
+              <label className="ml-auto flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-100">
+                <input
+                  type="checkbox"
+                  checked={includePreBaselineEstimates}
+                  onChange={(event) => setIncludePreBaselineEstimates(event.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-amber-200/60 bg-slate-900 text-amber-300 focus:ring-amber-300"
+                />
+                Include pre-baseline estimates
+              </label>
             </div>
 
+            {!portfolioValue && portfolioLoading && (
+              <div className="mt-5 flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 p-5 text-sm text-slate-300">
+                <svg className="h-5 w-5 animate-spin text-cyan-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Fetching portfolio data…
+              </div>
+            )}
+
             {portfolioValue ? (
-              <div className="mt-5 space-y-5">
+              <div className="relative mt-5 space-y-5">
+                {portfolioLoading && (
+                  <div className="absolute -top-1 right-0 z-10 flex items-center gap-2 rounded-full border border-white/15 bg-slate-900/95 px-3 py-1.5 text-xs text-slate-300 shadow-lg">
+                    <svg className="h-3.5 w-3.5 animate-spin text-cyan-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Updating…
+                  </div>
+                )}
+                <div className={`space-y-5 transition-all duration-150 ${portfolioLoading ? 'pointer-events-none opacity-30 blur-[1px]' : ''}`}>
+                {portfolioValue.estimation?.enabled && (
+                  <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+                    Estimation mode enabled. Metrics before {portfolioValue.estimation.originalBaselineDate} are inferred from
+                    {` ${portfolioValue.estimation.knownPreBaselineTransactions} `}
+                    known pre-baseline transaction(s). Baseline-date onward remains authoritative.
+                  </div>
+                )}
+
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div
                     className={`rounded-xl bg-white/95 p-4 text-slate-950 cursor-pointer select-none transition-all ${selectedChart === 'holdings' ? 'ring-2 ring-teal-500' : 'opacity-85 hover:opacity-100'}`}
@@ -910,7 +1158,57 @@ function App() {
                     />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.irr)}</p>
                   </div>
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
+                    <MetricLabel
+                      label="CAGR"
+                      tooltip="Compound Annual Growth Rate. Annualized TWR showing the equivalent yearly growth rate over the selected timeframe."
+                    />
+                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.cagr)}</p>
+                    {portfolioValue.benchmarkCagr !== undefined && portfolioValue.cagr !== undefined && (
+                      <p className={`mt-1 text-xs ${portfolioValue.cagr >= portfolioValue.benchmarkCagr ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        α {formatSignedPercent(portfolioValue.cagr - portfolioValue.benchmarkCagr)} vs VOO
+                      </p>
+                    )}
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
+                    <MetricLabel
+                      label="Volatility"
+                      tooltip="Annualized standard deviation of daily portfolio returns (×√252). Higher = more price variation."
+                    />
+                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.volatility)}</p>
+                    {portfolioValue.cagr !== undefined && portfolioValue.volatility !== undefined && portfolioValue.volatility > 0 && (
+                      <p className="mt-1 text-xs text-slate-400">
+                        Sharpe ≈ {(portfolioValue.cagr / portfolioValue.volatility).toFixed(2)}
+                      </p>
+                    )}
+                  </div>
                 </div>
+
+                {/* Benchmark comparison row */}
+                {(portfolioValue.benchmarkReturn !== undefined ||
+                  portfolioValue.benchmarkCagr !== undefined ||
+                  portfolioValue.benchmarkVolatility !== undefined) && (
+                  <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4">
+                    <p className="mb-3 text-xs uppercase tracking-[0.16em] text-amber-300">VOO Benchmark</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <p className="text-xs text-slate-400">Return</p>
+                        <p className="mt-1 text-base font-semibold text-white">{formatSignedPercent(portfolioValue.benchmarkReturn)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-400">CAGR</p>
+                        <p className="mt-1 text-base font-semibold text-white">{formatPercent(portfolioValue.benchmarkCagr)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-400">Volatility</p>
+                        <p className="mt-1 text-base font-semibold text-white">{formatPercent(portfolioValue.benchmarkVolatility)}</p>
+                        {portfolioValue.benchmarkCagr !== undefined && portfolioValue.benchmarkVolatility !== undefined && portfolioValue.benchmarkVolatility > 0 && (
+                          <p className="mt-0.5 text-xs text-slate-500">Sharpe ≈ {(portfolioValue.benchmarkCagr / portfolioValue.benchmarkVolatility).toFixed(2)}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {Array.isArray(portfolioValue.missingPriceSymbols) && portfolioValue.missingPriceSymbols.length > 0 && (
                   <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm text-amber-100">
@@ -925,8 +1223,10 @@ function App() {
                   usdSgdRate={usdSgdRate}
                   mode={selectedChart}
                   twrSeries={portfolioValue.twrSeries}
+                  benchmarkTwrSeries={portfolioValue.benchmarkTwrSeries}
                 />
               </div>
+            </div>
             ) : (
               <div className="mt-5 rounded-xl border border-dashed border-white/15 bg-white/5 p-5 text-sm text-slate-300">
                 No performance data
@@ -934,6 +1234,44 @@ function App() {
             )}
           </section>
         </main>
+
+        {/* Contribution analysis — full-width section below the two-column grid */}
+        {portfolioValue?.positionContributions &&
+          Object.keys(portfolioValue.positionContributions).length > 0 && (
+            <section className={`mt-6 rounded-2xl border border-white/10 bg-slate-900/65 p-6 shadow-xl backdrop-blur-sm transition-all duration-150 ${portfolioLoading ? 'pointer-events-none opacity-30 blur-[1px]' : ''}`}>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Contribution Analysis</h2>
+                  <p className="mt-0.5 text-xs text-slate-400">
+                    Price-return contribution per position for the selected timeframe ({timeframe.toUpperCase()}).
+                    Shows how much each holding's price movement added or removed in {displayCurrency}.
+                  </p>
+                </div>
+              </div>
+              <ContributionChart
+                contributions={portfolioValue.positionContributions}
+                displayCurrency={displayCurrency}
+                usdSgdRate={usdSgdRate}
+                timeframe={timeframe}
+              />
+
+              {portfolioValue.realizedGains && Object.keys(portfolioValue.realizedGains).length > 0 && (
+                <div className="mt-8">
+                  <h3 className="mb-1 text-base font-semibold text-slate-200">Realized Gains (since baseline)</h3>
+                  <p className="mb-4 text-xs text-slate-400">
+                    Closed positions: (sale price − average buy price) × shares sold, priced in USD via Yahoo Finance.
+                    This reflects actual locked-in profit or loss from trades completed after the baseline.
+                  </p>
+                  <ContributionChart
+                    contributions={portfolioValue.realizedGains}
+                    displayCurrency={displayCurrency}
+                    usdSgdRate={usdSgdRate}
+                    timeframe="all"
+                  />
+                </div>
+              )}
+            </section>
+          )}
       </div>
 
       <UploadModal
@@ -987,7 +1325,7 @@ function App() {
         <form onSubmit={handleTransactionsSubmit} className="space-y-4">
           <input
             type="file"
-            accept=".pdf"
+            accept=".pdf,.txt,.csv"
             onChange={(event) => setTransactionFile(event.target.files?.[0] ?? null)}
             className="block w-full text-sm text-slate-200 file:mr-4 file:rounded-full file:border-0 file:bg-cyan-300 file:px-4 file:py-2 file:text-sm file:font-medium file:text-slate-950"
           />

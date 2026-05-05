@@ -71,6 +71,89 @@ describe("getPortfolioAnchor", () => {
     expect(anchor?.baseline.id).toBe("b2");
     expect(anchor?.transactionsToApply.map((tx) => tx.id)).toEqual(["tx-after"]);
   });
+
+  it("can infer an earlier baseline from known pre-baseline transactions when enabled", () => {
+    const baselines: Baseline[] = [
+      {
+        id: "b1",
+        date: "2026-02-01",
+        holdings: { AMZN: 3 },
+        cash: 80,
+        source: "b1",
+      },
+    ];
+
+    const transactions: NormalizedTransaction[] = [
+      {
+        id: "tx-before",
+        date: "2026-01-10",
+        type: "BUY",
+        symbol: "AMZN",
+        quantity: 1,
+        price: 10,
+        amount: -10,
+        splitRatio: null,
+        source: "seed",
+      },
+      {
+        id: "tx-after",
+        date: "2026-02-10",
+        type: "DIVIDEND",
+        symbol: "AMZN",
+        quantity: null,
+        price: null,
+        amount: 5,
+        splitRatio: null,
+        source: "seed",
+      },
+    ];
+
+    const anchor = getPortfolioAnchor(baselines, transactions, {
+      includePreBaselineEstimates: true,
+    });
+
+    expect(anchor?.anchorType).toBe("BASELINE");
+    expect(anchor?.estimation?.enabled).toBe(true);
+    expect(anchor?.estimation?.originalBaselineDate).toBe("2026-02-01");
+    expect(anchor?.estimation?.inferredBaselineDate).toBe("2026-01-09");
+    expect(anchor?.baseline.holdings.AMZN).toBe(2);
+    expect(anchor?.baseline.cash).toBe(90);
+    expect(anchor?.transactionsToApply.map((tx) => tx.id)).toEqual(["tx-before", "tx-after"]);
+  });
+
+  it("keeps baseline anchor unchanged when estimation is enabled but no pre-baseline transactions exist", () => {
+    const baselines: Baseline[] = [
+      {
+        id: "b1",
+        date: "2026-02-01",
+        holdings: { AMZN: 3 },
+        cash: 80,
+        source: "b1",
+      },
+    ];
+
+    const transactions: NormalizedTransaction[] = [
+      {
+        id: "tx-after",
+        date: "2026-02-10",
+        type: "DIVIDEND",
+        symbol: "AMZN",
+        quantity: null,
+        price: null,
+        amount: 5,
+        splitRatio: null,
+        source: "seed",
+      },
+    ];
+
+    const anchor = getPortfolioAnchor(baselines, transactions, {
+      includePreBaselineEstimates: true,
+    });
+
+    expect(anchor?.baseline.id).toBe("b1");
+    expect(anchor?.estimation).toBeUndefined();
+    expect(anchor?.transactionsToApply.map((tx) => tx.id)).toEqual(["tx-after"]);
+  });
 });
 
 describe("findPreviousBaseline", () => {

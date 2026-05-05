@@ -55,10 +55,15 @@ export function fetchPortfolio() {
   return apiRequest<PortfolioResponse>('/api/portfolio')
 }
 
-export function fetchPortfolioValue(timeframe: PortfolioTimeframe, pricingMethod: PricingMethod) {
+export function fetchPortfolioValue(
+  timeframe: PortfolioTimeframe,
+  pricingMethod: PricingMethod,
+  includePreBaselineEstimates: boolean = false,
+) {
   const params = new URLSearchParams({
     pricingMethod,
     timeframe,
+    includePreBaselineEstimates: includePreBaselineEstimates ? 'true' : 'false',
   })
   return apiRequest<PortfolioValueResponse>(`/api/portfolio/value?${params.toString()}`)
 }

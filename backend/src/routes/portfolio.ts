@@ -3,10 +3,14 @@ import { getAllBaselines, getAllTransactions, getUploads } from "../store.js";
 import { reconstructState } from "../reconstruction.js";
 import type { NormalizedTransaction } from "../models/index.js";
 import {
+  buildBenchmarkFactorSeries,
   buildTwrFactorSeries,
+  calculateCagr,
   calculateIrr,
   calculatePerformance,
+  calculateSeriesVolatility,
   calculateTwr,
+  calculateVolatility,
   type PriceHistory,
 } from "../performance.js";
 import {
@@ -29,6 +33,13 @@ import { fetchUsdSgdHistory, convertSgdToUsd } from "../fx.js";
 const ACTIVE_PRICING_METHOD: PricingMethod = "yahoo_finance";
 type PortfolioTimeframe = "5d" | "1m" | "3m" | "6m" | "ytd" | "1y" | "3y" | "5y" | "all";
 const DEFAULT_TIMEFRAME: PortfolioTimeframe = "1y";
+
+export function resolveSplitFetchStartDate(
+  baselineDate: string,
+  estimation?: { originalBaselineDate: string }
+): string {
+  return estimation?.originalBaselineDate ?? baselineDate;
+}
 
 // Simple request queue to limit concurrent price fetches
 let activeRequests = 0;
@@ -313,6 +324,7 @@ async function getReconstructedFromLatestBaseline(requestId?: string) {
     postBaselineTransactions,
     state,
     allTransactions,
+    estimation: anchor.estimation,
   };
 }
 
@@ -408,6 +420,9 @@ router.get("/value", async (req, res) => {
 
   const pricingMethod = requestedMethod ?? ACTIVE_PRICING_METHOD;
   const timeframe = requestedTimeframe ?? DEFAULT_TIMEFRAME;
+  const includePreBaselineEstimates =
+    req.query.includePreBaselineEstimates === "1" ||
+    req.query.includePreBaselineEstimates === "true";
 
   // Prevent hanging requests - set a hard 90 second timeout for the entire request
   const timeoutHandle = setTimeout(() => {
@@ -421,12 +436,62 @@ router.get("/value", async (req, res) => {
     console.log(`[${requestId}] [portfolio/value] Enqueueing request with queue depth: ${requestQueue.length + activeRequests}`);
     const result = await enqueueRequest(async () => {
       console.log(`[${requestId}] [portfolio/value] Processing request: ${pricingMethod}/${timeframe}`);
+      const today = new Date().toISOString().slice(0, 10);
       
-      const reconstructed = await getReconstructedFromLatestBaseline(requestId);
+      const baselines = getAllBaselines();
+      const allTransactions = getAllTransactions();
+      const anchor = getPortfolioAnchor(baselines, allTransactions, {
+        includePreBaselineEstimates,
+      });
 
-      if (!reconstructed.ok) {
-        throw new Error(reconstructed.error);
+      if (!anchor) {
+        throw new Error("No portfolio data stored");
       }
+
+      let postBaselineTransactions = anchor.transactionsToApply;
+      const trackedSymbols = collectTrackedSymbols(anchor.baseline, anchor.transactionsToApply);
+      // In estimation mode, inferred baseline holdings are reverse-engineered from the
+      // latest real baseline, so pre-real-baseline corporate actions are already baked in.
+      // Fetching splits from inferred date would re-apply old splits and inflate quantities.
+      const splitStartDate = resolveSplitFetchStartDate(
+        anchor.baseline.date,
+        anchor.estimation
+      );
+
+      if (trackedSymbols.length > 0) {
+        try {
+          const splitResult = await fetchYahooFinanceStockSplits(
+            trackedSymbols,
+            splitStartDate,
+            today
+          );
+
+          postBaselineTransactions = mergeMarketSplitTransactions(
+            anchor.transactionsToApply,
+            splitResult.splits
+          );
+
+          console.log(
+            `[${requestId}] [portfolio] Using ${splitResult.splits.length} fetched market split event(s)`
+          );
+        } catch (error) {
+          console.error(`[${requestId}] [portfolio] Stock split enrichment failed:`, error);
+        }
+      }
+
+      const state = reconstructState(anchor.baseline, postBaselineTransactions);
+
+      const reconstructed = {
+        ok: true as const,
+        baseline: anchor.baseline,
+        anchorType: anchor.anchorType,
+        baselines,
+        transactionsApplied: postBaselineTransactions.length,
+        postBaselineTransactions,
+        state,
+        allTransactions,
+        estimation: anchor.estimation,
+      };
 
       const priceHistory: PriceHistory = {};
 
@@ -457,22 +522,24 @@ router.get("/value", async (req, res) => {
       }
 
       let livePriceFetch: { fetchedSymbols: string[]; failedSymbols: string[] } | null = null;
-      const today = new Date().toISOString().slice(0, 10);
 
       if (pricingMethod === "stooq_free_live" || pricingMethod === "google_finance" || pricingMethod === "yahoo_finance") {
         const symbols = Object.entries(reconstructed.state.holdings)
           .filter(([, quantity]) => quantity !== 0)
           .map(([symbol]) => symbol);
 
-        if (symbols.length > 0) {
-          console.log(`[${requestId}] [portfolio/value] Fetching prices for ${symbols.length} symbols via ${pricingMethod}`);
+        // Always include VOO for benchmark comparison even if not held.
+        const priceSymbols = Array.from(new Set([...symbols, "VOO"]));
+
+        if (priceSymbols.length > 0) {
+          console.log(`[${requestId}] [portfolio/value] Fetching prices for ${priceSymbols.length} symbols via ${pricingMethod}`);
 
           let historicalResult: { history: Record<string, Array<{ date: string; price: number }>>; fetchedSymbols: string[]; failedSymbols: string[] };
           try {
             const fetchPromise =
               pricingMethod === "yahoo_finance"
-                ? fetchYahooFinanceHistoricalPrices(symbols, reconstructed.baseline.date, today)
-                : fetchStooqHistoricalPrices(symbols, reconstructed.baseline.date, today);
+                ? fetchYahooFinanceHistoricalPrices(priceSymbols, reconstructed.baseline.date, today)
+                : fetchStooqHistoricalPrices(priceSymbols, reconstructed.baseline.date, today);
             
             historicalResult = await Promise.race([
               fetchPromise,
@@ -507,10 +574,10 @@ router.get("/value", async (req, res) => {
           try {
             const livePromise =
               pricingMethod === "google_finance"
-                ? fetchGoogleFinanceLatestPrices(symbols)
+                ? fetchGoogleFinanceLatestPrices(priceSymbols)
                 : pricingMethod === "stooq_free_live"
-                  ? fetchStooqLatestPrices(symbols)
-                  : fetchYahooFinanceLatestPrices(symbols);
+                  ? fetchStooqLatestPrices(priceSymbols)
+                  : fetchYahooFinanceLatestPrices(priceSymbols);
             
             result = await Promise.race([
               livePromise,
@@ -521,16 +588,17 @@ router.get("/value", async (req, res) => {
             console.log(`[${requestId}] [portfolio/value] Live prices fetched for ${result.fetchedSymbols.length} symbols`);
           } catch (liveErr) {
             console.error(`[${requestId}] [portfolio/value] Live price fetch failed:`, liveErr);
-            result = { livePrices: {}, fetchedSymbols: [], failedSymbols: symbols };
+            result = { livePrices: {}, fetchedSymbols: [], failedSymbols: priceSymbols };
           }
 
+          // Report fetch status only for portfolio symbols (not benchmark VOO).
           livePriceFetch = {
             fetchedSymbols: Array.from(
               new Set([...historicalResult.fetchedSymbols, ...result.fetchedSymbols])
-            ),
+            ).filter((s) => s !== "VOO"),
             failedSymbols: Array.from(
               new Set([...historicalResult.failedSymbols, ...result.failedSymbols])
-            ),
+            ).filter((s) => s !== "VOO"),
           };
 
           for (const [symbol, price] of Object.entries(result.livePrices)) {
@@ -545,12 +613,6 @@ router.get("/value", async (req, res) => {
           }
         }
       }
-
-      const performance = calculatePerformance(
-        reconstructed.baseline,
-        reconstructed.postBaselineTransactions,
-        priceHistory
-      );
 
       console.log(`[${requestId}] [portfolio/value] Fetching FX rates from ${reconstructed.baseline.date} to ${today}`);
       let fxPoints: Array<{ date: string; price: number }> = [];
@@ -569,6 +631,15 @@ router.get("/value", async (req, res) => {
         fxPoints = [];
         currentUsdSgdRate = null;
       }
+
+      // FX history is passed to calculatePerformance so cash balances (SGD) are
+      // converted to USD when computing each series point's totalValue.
+      const performance = calculatePerformance(
+        reconstructed.baseline,
+        reconstructed.postBaselineTransactions,
+        priceHistory,
+        fxPoints
+      );
 
       // Calculate TWR/IRR on the FULL unsampled series to preserve all deposit/withdrawal dates
       const fullTransactionsUsd: NormalizedTransaction[] = reconstructed.postBaselineTransactions.map((tx) => {
@@ -598,6 +669,45 @@ router.get("/value", async (req, res) => {
       const sampledIrr = calculateIrr(sampledSeries, timeframeTransactionsUsd);
       const sampledTwrFactorSeries = buildTwrFactorSeries(sampledSeries, timeframeTransactionsUsd);
 
+      // CAGR: annualized TWR for the sampled timeframe.
+      const cagr =
+        startPoint && latestPoint
+          ? calculateCagr(sampledTwr, startPoint.date, latestPoint.date)
+          : undefined;
+
+      // Volatility: computed on the FULL (unsampled) series filtered to the timeframe
+      // so that daily returns are used, avoiding sampling distortion.
+      const timeframeFullSeries =
+        startPoint && latestPoint
+          ? performance.series.filter(
+              (p) => p.date >= startPoint.date && p.date <= latestPoint.date
+            )
+          : [];
+      const volatility = calculateVolatility(timeframeFullSeries);
+
+      // Benchmark (VOO): build a factor series aligned to the sampled dates.
+      const vooPrices = priceHistory["VOO"] ?? [];
+      const benchmarkTwrSeries = buildBenchmarkFactorSeries(sampledSeries, vooPrices);
+
+      // Benchmark return and CAGR for the timeframe.
+      const benchmarkReturn =
+        benchmarkTwrSeries && benchmarkTwrSeries.length > 0
+          ? benchmarkTwrSeries[benchmarkTwrSeries.length - 1]! - 1
+          : undefined;
+      const benchmarkCagr =
+        startPoint && latestPoint
+          ? calculateCagr(benchmarkReturn, startPoint.date, latestPoint.date)
+          : undefined;
+
+      // Benchmark volatility: from raw daily VOO prices filtered to timeframe.
+      const vooForTimeframe =
+        startPoint && latestPoint
+          ? vooPrices
+              .filter((p) => p.date >= startPoint.date && p.date <= latestPoint.date)
+              .sort((a, b) => (a.date < b.date ? -1 : 1))
+          : [];
+      const benchmarkVolatility = calculateSeriesVolatility(vooForTimeframe.map((p) => p.price));
+
       const sampledTotalReturn =
         startPoint && latestPoint && startPoint.totalValue !== 0
           ? (latestPoint.totalValue - startPoint.totalValue) / startPoint.totalValue
@@ -614,6 +724,71 @@ router.get("/value", async (req, res) => {
         }
       }
 
+      // Per-symbol price-return contribution over the timeframe:
+      //   contribution = quantity_now × (price_end − price_start)
+      // This answers "how many dollars did each position's price movement add/remove?"
+      // Buys/sells within the timeframe are ignored for simplicity — this is a
+      // price attribution, not a full P&L attribution.
+      const positionContributions: Record<string, number> = {};
+      if (startPoint) {
+        for (const [symbol, quantity] of Object.entries(reconstructed.state.holdings)) {
+          if (quantity === 0) continue;
+          const startPrice = getLatestPrice(symbol, startPoint.date);
+          const endPrice = getLatestPrice(symbol, today);
+          if (startPrice !== undefined && endPrice !== undefined) {
+            positionContributions[symbol] = quantity * (endPrice - startPrice);
+          }
+        }
+      }
+
+      // Realized gains per symbol using average cost basis (USD via Yahoo prices).
+      // Tracks BUY/SELL transactions chronologically, computing gain = (sale_price - avg_cost) × qty
+      // for each partial or full close. Covers the full post-baseline period (not timeframe-filtered)
+      // so that closed positions (qty = 0 today) still appear in the attribution.
+      const realizedGains: Record<string, number> = {};
+      {
+        const costBasis: Record<string, { avgCost: number; quantity: number }> = {};
+        const buysSells = reconstructed.postBaselineTransactions
+          .filter(
+            (tx) =>
+              (tx.type === "BUY" || tx.type === "SELL") &&
+              tx.symbol !== null &&
+              tx.quantity !== null
+          )
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+        for (const tx of buysSells) {
+          const symbol = tx.symbol!;
+          const qty = tx.quantity!;
+          // Use Yahoo historical price on the transaction date for USD consistency.
+          const txPrice = getLatestPrice(symbol, tx.date);
+          if (txPrice === undefined) continue;
+
+          if (tx.type === "BUY") {
+            const current = costBasis[symbol] ?? { avgCost: 0, quantity: 0 };
+            const newQty = current.quantity + qty;
+            if (newQty > 0) {
+              costBasis[symbol] = {
+                avgCost: (current.avgCost * current.quantity + txPrice * qty) / newQty,
+                quantity: newQty,
+              };
+            }
+          } else if (tx.type === "SELL") {
+            const current = costBasis[symbol];
+            if (!current || current.quantity <= 0) continue;
+            const soldQty = Math.min(qty, current.quantity);
+            const gain = (txPrice - current.avgCost) * soldQty;
+            realizedGains[symbol] = (realizedGains[symbol] ?? 0) + gain;
+            const remainingQty = current.quantity - soldQty;
+            if (remainingQty <= 0) {
+              delete costBasis[symbol];
+            } else {
+              costBasis[symbol] = { avgCost: current.avgCost, quantity: remainingQty };
+            }
+          }
+        }
+      }
+
       if (!latestPoint) {
         console.log(`[${requestId}] [portfolio/value] No latest point, returning empty response`);
         return {
@@ -626,10 +801,19 @@ router.get("/value", async (req, res) => {
           twr: sampledTwr,
           irr: sampledIrr,
           twrSeries: sampledTwrFactorSeries,
+          cagr,
+          volatility,
+          benchmarkTwrSeries,
+          benchmarkReturn,
+          benchmarkCagr,
+          benchmarkVolatility,
           series: sampledSeries,
           positionValues,
+          positionContributions,
+          realizedGains,
           pricingMethod,
           timeframe,
+          estimation: reconstructed.estimation,
           usdSgdRate: currentUsdSgdRate,
           livePriceFetch,
         };
@@ -653,10 +837,19 @@ router.get("/value", async (req, res) => {
         twr: sampledTwr,
         irr: sampledIrr,
         twrSeries: sampledTwrFactorSeries,
+        cagr,
+        volatility,
+        benchmarkTwrSeries,
+        benchmarkReturn,
+        benchmarkCagr,
+        benchmarkVolatility,
         series: sampledSeries,
         positionValues,
+        positionContributions,
+        realizedGains,
         pricingMethod,
         timeframe,
+        estimation: reconstructed.estimation,
         usdSgdRate: currentUsdSgdRate,
         missingPriceSymbols,
         livePriceFetch,

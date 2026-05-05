@@ -55,6 +55,7 @@ describe("performance calculations", () => {
     expect(result.series[0]).toEqual({
       date: "2025-01-01",
       holdingsValue: 1000,
+      cashValue: 0,
       totalValue: 1000,
     });
 
@@ -62,6 +63,7 @@ describe("performance calculations", () => {
     expect(oneYearPoint).toEqual({
       date: "2026-01-01",
       holdingsValue: 1200,
+      cashValue: 0,
       totalValue: 1200,
     });
 
@@ -110,20 +112,24 @@ describe("performance calculations", () => {
     };
 
     const series = buildPortfolioValueSeries(baseline, transactions, prices);
+    // No FX history in tests — deposit amount (1000) is treated as already USD.
     expect(series[0]).toEqual({
       date: "2025-01-01",
       holdingsValue: 1000,
+      cashValue: 0,
       totalValue: 1000,
     });
     expect(series.find((p) => p.date === "2025-07-01")).toEqual({
       date: "2025-07-01",
       holdingsValue: 1200,
-      totalValue: 1200,
+      cashValue: 1000,
+      totalValue: 2200,
     });
     expect(series.find((p) => p.date === "2026-01-01")).toEqual({
       date: "2026-01-01",
       holdingsValue: 1200,
-      totalValue: 1200,
+      cashValue: 1000,
+      totalValue: 2200,
     });
 
     const result = calculatePerformance(baseline, transactions, prices);
@@ -131,9 +137,11 @@ describe("performance calculations", () => {
     expect(result.twr).toBeDefined();
     expect(result.irr).toBeDefined();
 
-    // In stock-only mode, deposits are external cash flows that do not raise
-    // portfolio value directly (cash is excluded from valuation).
-    expect(result.twr!).toBeCloseTo(-0.8, 6);
+    // With cash included in totalValue, the deposit raises portfolio value:
+    // Period 1 (Jan→Jul): (2200 - 1000 - 1000) / 1000 = 0.2 (stock grew 20%)
+    // Period 2 (Jul→end): (2200 - 2200) / 2200 = 0 (no change)
+    // TWR = 1.2 × 1.0 - 1 = 0.2
+    expect(result.twr!).toBeCloseTo(0.2, 6);
 
     // IRR includes timing and size of external cash flow, so it diverges from TWR.
     const diff = Math.abs(result.twr! - result.irr!);

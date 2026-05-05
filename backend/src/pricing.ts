@@ -488,11 +488,15 @@ export async function fetchYahooFinanceHistoricalPrices(
 
       const pointByDate = new Map<string, PricePoint>();
       for (const row of rows) {
+        // Use unadjusted close so prices are consistent with our split-event
+        // quantity adjustments. adjclose retroactively divides all historical
+        // prices by the split ratio, which would double-count the split when
+        // our SPLIT transactions also multiply share counts.
         const price =
-          typeof row.adjclose === "number"
-            ? row.adjclose
-            : typeof row.close === "number"
-              ? row.close
+          typeof row.close === "number"
+            ? row.close
+            : typeof row.adjclose === "number"
+              ? row.adjclose
               : undefined;
 
         if (!(row.date instanceof Date) || price === undefined || !Number.isFinite(price)) {

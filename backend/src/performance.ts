@@ -122,10 +122,39 @@ function calculateHoldingsValue(
   return holdingsValue;
 }
 
+type FxPoint = { date: string; price: number };
+
+/**
+ * Convert a cash amount in SGD to USD using the most recent FX rate on or before
+ * the given date. Falls back to the earliest available rate if none precedes the date.
+ * If no FX history is provided (e.g. in tests), the amount is treated as already in USD.
+ */
+function convertCashToUsd(cashSgd: number, date: string, fxHistory: FxPoint[]): number {
+  if (fxHistory.length === 0) return cashSgd;
+
+  let rate: number | undefined;
+  for (const point of fxHistory) {
+    if (point.date <= date) {
+      rate = point.price;
+    } else {
+      break;
+    }
+  }
+
+  // Use earliest available rate if no point precedes the date.
+  if (rate === undefined) {
+    rate = fxHistory[0]!.price;
+  }
+
+  // USD/SGD rate: 1 USD = rate SGD → cashUsd = cashSgd / rate.
+  return cashSgd / rate;
+}
+
 export function buildPortfolioValueSeries(
   baseline: Baseline,
   transactions: NormalizedTransaction[],
-  priceHistory: PriceHistory
+  priceHistory: PriceHistory,
+  fxHistory: FxPoint[] = []
 ): PortfolioValuePoint[] {
   const sortedTransactions = deduplicateAndSortTransactions(transactions);
   const postBaselineTransactions: NormalizedTransaction[] = [];
@@ -165,12 +194,14 @@ export function buildPortfolioValueSeries(
       baseline.date,
       baseline.holdingPrices
     );
-    const totalValue = holdingsValue;
+    const cashValue = convertCashToUsd(state.cash, date, fxHistory);
+    const totalValue = holdingsValue + cashValue;
 
     series.push({
       date,
       totalValue,
       holdingsValue,
+      cashValue,
     });
   }
 
@@ -494,12 +525,102 @@ export function calculateIrr(
   return (low + high) / 2;
 }
 
+/**
+ * Annualizes a TWR to a CAGR.
+ * CAGR = (1 + twr)^(1/years) − 1
+ */
+export function calculateCagr(
+  twr: number | undefined,
+  startDate: string,
+  endDate: string
+): number | undefined {
+  if (twr === undefined) return undefined;
+  const years = daysBetween(startDate, endDate) / 365.25;
+  if (years <= 0) return undefined;
+  return Math.pow(1 + twr, 1 / years) - 1;
+}
+
+/**
+ * Annualized volatility from an array of consecutive values.
+ * Computes daily returns, then annualizes by sqrt(252).
+ * Expects a dense (daily) series; sampled series will underestimate volatility.
+ */
+export function calculateSeriesVolatility(values: number[]): number | undefined {
+  if (values.length < 3) return undefined;
+
+  const returns: number[] = [];
+  for (let i = 1; i < values.length; i += 1) {
+    const prev = values[i - 1]!;
+    const curr = values[i]!;
+    if (prev <= 0) continue;
+    returns.push((curr - prev) / prev);
+  }
+
+  if (returns.length < 2) return undefined;
+
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance =
+    returns.reduce((a, b) => a + (b - mean) ** 2, 0) / (returns.length - 1);
+
+  // Annualize using sqrt(252) trading days
+  return Math.sqrt(variance) * Math.sqrt(252);
+}
+
+/** Annualized volatility from a portfolio value series (uses holdingsValue). */
+export function calculateVolatility(series: PortfolioValuePoint[]): number | undefined {
+  return calculateSeriesVolatility(series.map((p) => p.holdingsValue));
+}
+
+/**
+ * Builds a normalized factor series for a benchmark asset aligned to the
+ * given portfolio series dates. Factor of 1.0 = baseline (first series date).
+ * Uses the last available benchmark price on or before each date (forward-fill).
+ */
+export function buildBenchmarkFactorSeries(
+  series: PortfolioValuePoint[],
+  benchmarkPrices: Array<{ date: string; price: number }>
+): number[] | undefined {
+  if (series.length === 0 || benchmarkPrices.length === 0) return undefined;
+
+  const sorted = [...benchmarkPrices].sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+  );
+
+  // Binary search for the last price on or before `date`.
+  function forwardFill(date: string): number | undefined {
+    let lo = 0;
+    let hi = sorted.length - 1;
+    let result: number | undefined;
+
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (sorted[mid]!.date <= date) {
+        result = sorted[mid]!.price;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    return result;
+  }
+
+  const basePrice = forwardFill(series[0]!.date);
+  if (basePrice === undefined || basePrice <= 0) return undefined;
+
+  return series.map((point) => {
+    const price = forwardFill(point.date);
+    return price !== undefined ? price / basePrice : 1;
+  });
+}
+
 export function calculatePerformance(
   baseline: Baseline,
   transactions: NormalizedTransaction[],
-  priceHistory: PriceHistory
+  priceHistory: PriceHistory,
+  fxHistory: FxPoint[] = []
 ): PerformanceResult {
-  const series = buildPortfolioValueSeries(baseline, transactions, priceHistory);
+  const series = buildPortfolioValueSeries(baseline, transactions, priceHistory, fxHistory);
 
   if (series.length === 0) {
     return {

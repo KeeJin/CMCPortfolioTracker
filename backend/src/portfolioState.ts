@@ -5,6 +5,16 @@ export type PortfolioAnchor = {
   baselines: Baseline[];
   transactionsToApply: NormalizedTransaction[];
   anchorType: "BASELINE" | "TRANSACTIONS_ONLY";
+  estimation?: {
+    enabled: boolean;
+    inferredBaselineDate: string;
+    originalBaselineDate: string;
+    knownPreBaselineTransactions: number;
+  };
+};
+
+type AnchorOptions = {
+  includePreBaselineEstimates?: boolean;
 };
 
 function shiftIsoDate(date: string, deltaDays: number): string {
@@ -35,6 +45,80 @@ function sortTransactions(transactions: NormalizedTransaction[]): NormalizedTran
     .map((item) => item.tx);
 }
 
+function applyReverseTransaction(
+  holdings: Record<string, number>,
+  cash: number,
+  tx: NormalizedTransaction
+): { holdings: Record<string, number>; cash: number } {
+  const nextHoldings = { ...holdings };
+  let nextCash = cash;
+
+  if (tx.type === "BUY") {
+    if (tx.symbol !== null && tx.quantity !== null) {
+      const current = nextHoldings[tx.symbol] ?? 0;
+      const next = current - tx.quantity;
+      if (next === 0) {
+        delete nextHoldings[tx.symbol];
+      } else {
+        nextHoldings[tx.symbol] = next;
+      }
+    }
+    nextCash -= tx.amount;
+    return { holdings: nextHoldings, cash: nextCash };
+  }
+
+  if (tx.type === "SELL") {
+    if (tx.symbol !== null && tx.quantity !== null) {
+      const current = nextHoldings[tx.symbol] ?? 0;
+      nextHoldings[tx.symbol] = current + tx.quantity;
+    }
+    nextCash -= tx.amount;
+    return { holdings: nextHoldings, cash: nextCash };
+  }
+
+  if (tx.type === "DIVIDEND" || tx.type === "DEPOSIT" || tx.type === "WITHDRAWAL") {
+    nextCash -= tx.amount;
+    return { holdings: nextHoldings, cash: nextCash };
+  }
+
+  if (tx.type === "SPLIT") {
+    if (tx.symbol !== null && tx.splitRatio !== null && tx.splitRatio > 0) {
+      const current = nextHoldings[tx.symbol] ?? 0;
+      if (current !== 0) {
+        nextHoldings[tx.symbol] = current / tx.splitRatio;
+      }
+    }
+    return { holdings: nextHoldings, cash: nextCash };
+  }
+
+  return { holdings: nextHoldings, cash: nextCash };
+}
+
+function inferBaselineFromKnownPreBaselineTransactions(
+  baseline: Baseline,
+  preBaselineTransactions: NormalizedTransaction[]
+): Baseline {
+  let inferredHoldings = { ...baseline.holdings };
+  let inferredCash = baseline.cash;
+
+  for (let i = preBaselineTransactions.length - 1; i >= 0; i -= 1) {
+    const tx = preBaselineTransactions[i]!;
+    const reversed = applyReverseTransaction(inferredHoldings, inferredCash, tx);
+    inferredHoldings = reversed.holdings;
+    inferredCash = reversed.cash;
+  }
+
+  const earliestDate = preBaselineTransactions[0]!.date;
+
+  return {
+    id: `inferred-prebaseline-${baseline.id}`,
+    date: shiftIsoDate(earliestDate, -1),
+    holdings: inferredHoldings,
+    cash: inferredCash,
+    source: "inferred-prebaseline-estimate",
+  };
+}
+
 export function findPreviousBaseline(
   baselines: Baseline[],
   targetBaseline: Baseline
@@ -53,20 +137,56 @@ export function findPreviousBaseline(
 
 export function getPortfolioAnchor(
   baselines: Baseline[],
-  transactions: NormalizedTransaction[]
+  transactions: NormalizedTransaction[],
+  options?: AnchorOptions
 ): PortfolioAnchor | null {
   const sortedBaselines = sortBaselines(baselines);
   const sortedTransactions = sortTransactions(transactions);
 
   if (sortedBaselines.length > 0) {
-    const baseline = sortedBaselines[sortedBaselines.length - 1]!;
-    const transactionsToApply = sortedTransactions.filter((tx) => tx.date > baseline.date);
+    const latestBaseline = sortedBaselines[sortedBaselines.length - 1]!;
+
+    if (!options?.includePreBaselineEstimates) {
+      const transactionsToApply = sortedTransactions.filter((tx) => tx.date > latestBaseline.date);
+
+      return {
+        baseline: latestBaseline,
+        baselines: sortedBaselines,
+        transactionsToApply,
+        anchorType: "BASELINE",
+      };
+    }
+
+    const preBaselineTransactions = sortedTransactions.filter((tx) => tx.date < latestBaseline.date);
+
+    if (preBaselineTransactions.length === 0) {
+      const transactionsToApply = sortedTransactions.filter((tx) => tx.date > latestBaseline.date);
+
+      return {
+        baseline: latestBaseline,
+        baselines: sortedBaselines,
+        transactionsToApply,
+        anchorType: "BASELINE",
+      };
+    }
+
+    const inferredBaseline = inferBaselineFromKnownPreBaselineTransactions(
+      latestBaseline,
+      preBaselineTransactions
+    );
+    const transactionsToApply = sortedTransactions.filter((tx) => tx.date > inferredBaseline.date);
 
     return {
-      baseline,
+      baseline: inferredBaseline,
       baselines: sortedBaselines,
       transactionsToApply,
       anchorType: "BASELINE",
+      estimation: {
+        enabled: true,
+        inferredBaselineDate: inferredBaseline.date,
+        originalBaselineDate: latestBaseline.date,
+        knownPreBaselineTransactions: preBaselineTransactions.length,
+      },
     };
   }
 

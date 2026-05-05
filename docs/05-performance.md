@@ -346,6 +346,77 @@ Example:
 
 ---
 
+## 12. Additional Metrics (Implemented)
+
+### CAGR (Compound Annual Growth Rate)
+
+Annualizes the timeframe TWR:
+
+```ts
+CAGR = (1 + TWR)^(1 / years) - 1
+```
+
+where `years = daysBetween(startDate, endDate) / 365.25`.
+
+Returned per timeframe alongside TWR.
+
+---
+
+### Volatility
+
+Annualized standard deviation of daily portfolio returns:
+
+```ts
+daily_return[i] = (holdingsValue[i] - holdingsValue[i-1]) / holdingsValue[i-1]
+volatility = stddev(daily_returns) * sqrt(252)
+```
+
+Computed on the full daily series filtered to the timeframe (not the sampled series) to preserve daily granularity.
+
+---
+
+### Benchmark Comparison (VOO)
+
+VOO historical prices are fetched alongside portfolio symbols.
+A normalized factor series is built aligned to the sampled portfolio dates:
+
+```ts
+benchmarkFactor[i] = VOO_price[i] / VOO_price[0]
+```
+
+Derived benchmark metrics:
+- `benchmarkReturn` = final factor - 1
+- `benchmarkCagr` = annualized benchmark return
+- `benchmarkVolatility` = annualized std-dev of daily VOO returns
+
+Derived relationship metrics (computed in frontend):
+- **Alpha** = portfolio CAGR − VOO CAGR (excess return)
+- **Sharpe Ratio** ≈ CAGR / Volatility (simplified, no risk-free rate)
+
+---
+
+## Future Work
+
+### Rolling Returns
+
+Compute rolling N-day/N-month TWR windows:
+
+```ts
+rolling_1y_twr[t] = TWR(t-365, t)
+```
+
+This would show whether recent performance is better or worse than historical averages and identify periods of outperformance.
+
+### LLM-Powered Narrative Insights
+
+Once the above metrics are available as structured data, an LLM could generate natural-language summaries such as:
+
+> "Your portfolio has returned +18.4% CAGR over 3 years, beating VOO by +3.2% (alpha), but with 22% higher volatility. Your Sharpe ratio of 1.4 is above the benchmark's 1.1."
+
+Integration approach: structured metric payload → LLM prompt → rendered insight card on the dashboard. Should be opt-in and clearly labelled as AI-generated.
+
+---
+
 ## Guiding Principle
 
 Performance must reflect:
