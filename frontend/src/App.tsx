@@ -828,9 +828,28 @@ function App() {
   const series = portfolioValue?.series ?? []
   const startHoldingsValue = series[0]?.holdingsValue
   const endHoldingsValue = series.length > 0 ? series[series.length - 1]?.holdingsValue : undefined
+  const startCashValue = series[0]?.cashValue
+  const endCashValue = series.length > 0 ? series[series.length - 1]?.cashValue : undefined
+  const startTotalValue = series[0]?.totalValue
   const holdingsValueChange =
     typeof startHoldingsValue === 'number' && typeof endHoldingsValue === 'number'
       ? endHoldingsValue - startHoldingsValue
+      : undefined
+  const cashValueChange =
+    typeof startCashValue === 'number' && typeof endCashValue === 'number'
+      ? endCashValue - startCashValue
+      : undefined
+  const holdingsReturnContribution =
+    typeof holdingsValueChange === 'number' && typeof startTotalValue === 'number' && startTotalValue !== 0
+      ? holdingsValueChange / startTotalValue
+      : undefined
+  const cashReturnContribution =
+    typeof cashValueChange === 'number' && typeof startTotalValue === 'number' && startTotalValue !== 0
+      ? cashValueChange / startTotalValue
+      : undefined
+  const returnBreakdownTotal =
+    typeof holdingsReturnContribution === 'number' && typeof cashReturnContribution === 'number'
+      ? holdingsReturnContribution + cashReturnContribution
       : undefined
   const usdSgdRate = portfolioValue?.usdSgdRate ?? null
 
@@ -839,6 +858,12 @@ function App() {
     typeof endHoldingsValue === 'number' &&
     startHoldingsValue !== 0
       ? (endHoldingsValue - startHoldingsValue) / startHoldingsValue
+      : undefined
+  const cashValueChangePercent =
+    typeof startCashValue === 'number' &&
+    typeof endCashValue === 'number' &&
+    startCashValue !== 0
+      ? (endCashValue - startCashValue) / startCashValue
       : undefined
 
   return (
@@ -1139,6 +1164,23 @@ function App() {
                       tooltip="Simple change from first to last portfolio value in the selected timeframe. This is not cash-flow adjusted."
                     />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.totalReturn)}</p>
+                    <div className="mt-2 space-y-1 text-xs text-slate-400">
+                      <p>
+                        Holdings change: <span className="text-slate-200">{formatSignedPercent(holdingsValueChangePercent)}</span>
+                      </p>
+                      <p>
+                        Cash change: <span className="text-slate-200">{formatSignedPercent(cashValueChangePercent)}</span>
+                      </p>
+                      <p>
+                        Holdings contrib to total return: <span className="text-slate-200">{formatSignedPercent(holdingsReturnContribution)}</span>
+                      </p>
+                      <p>
+                        Cash contrib to total return: <span className="text-slate-200">{formatSignedPercent(cashReturnContribution)}</span>
+                      </p>
+                      <p>
+                        Sum check: <span className="text-slate-200">{formatPercent(returnBreakdownTotal)}</span>
+                      </p>
+                    </div>
                   </div>
                   <div
                     className={`rounded-xl border p-4 text-white cursor-pointer select-none transition-all ${selectedChart === 'twr' ? 'border-indigo-400/60 bg-indigo-500/20 ring-2 ring-indigo-400' : 'border-white/10 bg-white/5 opacity-85 hover:opacity-100'}`}
