@@ -120,6 +120,7 @@ export type PortfolioValueResponse = {
     fetchedSymbols: string[]
     failedSymbols: string[]
   } | null
+  lastPriceSyncAt?: string | null
   debug?: {
     timeframe: PortfolioTimeframe
     pricePointCount: number

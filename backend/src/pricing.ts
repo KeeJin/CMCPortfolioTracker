@@ -134,6 +134,8 @@ export async function fetchYahooFinanceHistoricalPrices(
   return { history, fetchedSymbols, failedSymbols, failedDetails };
 }
 
+export let lastLivePriceSyncAt: string | null = null;
+
 export async function fetchYahooFinanceLatestPrices(symbols: string[]) {
   const livePrices: Record<string, number> = {};
   const fetchedSymbols: string[] = [];
@@ -147,6 +149,7 @@ export async function fetchYahooFinanceLatestPrices(symbols: string[]) {
       if (Number.isFinite(value)) {
         livePrices[symbol] = value;
         fetchedSymbols.push(symbol);
+        lastLivePriceSyncAt = new Date().toISOString();
       } else {
         failedSymbols.push(symbol);
         failedDetails.push({ symbol, reason: 'quote returned an invalid or missing price value' });

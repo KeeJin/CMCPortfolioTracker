@@ -669,7 +669,7 @@ function App() {
   const [portfolioValue, setPortfolioValue] = useState<PortfolioValueResponse | null>(null)
   const [portfolioLoading, setPortfolioLoading] = useState(true)
   const [portfolioError, setPortfolioError] = useState<string | null>(null)
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null)
+  const [lastPriceSync, setLastPriceSync] = useState<string | null>(null)
   const [debugTwrPanel, setDebugTwrPanel] = useState(false)
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false)
   const [baselineModalOpen, setBaselineModalOpen] = useState(false)
@@ -714,12 +714,7 @@ function App() {
       setHistory(snapshot.history)
       setPortfolio(snapshot.portfolio)
       setPortfolioValue(snapshot.portfolioValue)
-      setLastUpdated(
-        new Intl.DateTimeFormat('en-SG', {
-          dateStyle: 'medium',
-          timeStyle: 'short',
-        }).format(new Date()),
-      )
+      setLastPriceSync(snapshot.portfolioValue?.lastPriceSyncAt ?? null)
     } catch (error) {
       setHistory(null)
       setPortfolio(null)
@@ -751,12 +746,7 @@ function App() {
         setPortfolio(snapshot.portfolio)
         setPortfolioValue(snapshot.portfolioValue)
         setPortfolioError(null)
-        setLastUpdated(
-          new Intl.DateTimeFormat('en-SG', {
-            dateStyle: 'medium',
-            timeStyle: 'short',
-          }).format(new Date()),
-        )
+        setLastPriceSync(snapshot.portfolioValue?.lastPriceSyncAt ?? null)
       } catch (error) {
         if (cancelled) {
           return
@@ -941,7 +931,7 @@ function App() {
               </span>
             )}
             <span className="rounded-full border border-cyan-300/30 bg-cyan-500/10 px-3 py-1 text-cyan-100">
-              Last updated: {lastUpdated ?? '—'}
+              Last price sync: {lastPriceSync ? new Intl.DateTimeFormat('en-SG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(lastPriceSync)) : '—'}
             </span>
             {baselineUpload.result && (
               <span className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-3 py-1 text-emerald-100">

@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { getAllBaselines, getAllTransactions, getAllUploads } from '../store.js';
 import { getPortfolioAnchor } from '../portfolioState.js';
 import { applyTransaction, reconstructState, sortTransactions } from '../reconstruction.js';
-import { fetchYahooFinanceHistoricalPrices, fetchYahooFinanceLatestPrices } from '../pricing.js';
+import { fetchYahooFinanceHistoricalPrices, fetchYahooFinanceLatestPrices, lastLivePriceSyncAt } from '../pricing.js';
 import { mergeMarketSplitTransactions } from '../marketSplits.js';
 import { getCachedPricesForSymbol } from '../priceCache.js';
 import { convertSgdToUsd, fetchUsdSgdHistory } from '../fx.js';
@@ -774,6 +774,7 @@ router.get('/value', async (req: Request, res: Response) => {
     usdSgdRate,
     missingPriceSymbols: [],
     livePriceFetch: null,
+    lastPriceSyncAt: lastLivePriceSyncAt,
   };
 
   if (includeDebug) {
