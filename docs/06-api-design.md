@@ -255,7 +255,6 @@ Allowed timeframes:
   "endDate": "2026-05-05",
   "totalReturn": 1.5182,
   "twr": 1.5193,
-  "irr": 2.1540,
   "pricingMethod": "yahoo_finance",
   "timeframe": "all",
   "livePriceFetch": {
@@ -335,8 +334,7 @@ GET /api/performance
 ```json id="performance_resp"
 {
   "totalReturn": 0.12,
-  "twr": 0.10,
-  "irr": 0.11
+  "twr": 0.10
 }
 ```
 

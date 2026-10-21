@@ -183,10 +183,9 @@ The system should support:
 
 * Current portfolio holdings
 * Historical portfolio value (daily or periodic)
-* Performance metrics:
+* Performance context:
 
   * time-weighted return (TWR)
-  * money-weighted return (IRR)
 * Reconciliation reports:
 
   * differences between expected and actual holdings

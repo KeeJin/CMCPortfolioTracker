@@ -182,13 +182,12 @@ GET /api/portfolio/value
 * Total Value
 * Total Return
 * TWR
-* IRR
 
 Behavior:
 
 * Holdings Value card is selectable and switches the chart to holdings mode
 * TWR card is selectable and switches the chart to TWR mode
-* Total Return and IRR are summary-only cards
+* Total Return remains a summary-only card
 
 ---
 

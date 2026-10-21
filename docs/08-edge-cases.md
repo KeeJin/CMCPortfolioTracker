@@ -14,7 +14,7 @@ Rules:
 
 * first-seen transaction wins
 * later duplicates are ignored
-* duplicate uploads must not change holdings, cash, TWR, or IRR
+* duplicate uploads must not change holdings, cash, or TWR
 
 ---
 
@@ -61,10 +61,10 @@ Rules:
 
 Sampling can hide deposit and withdrawal dates.
 
-If TWR or IRR is calculated on an already-sampled series without the corresponding timeframe-filtered cash flows, two errors can occur:
+If TWR is calculated on an already-sampled series without the corresponding timeframe-filtered cash flows, two errors can occur:
 
 * TWR collapses toward naive total return
-* TWR and IRR remain nearly constant across timeframes
+* TWR remains nearly constant across timeframes
 
 Rules:
 

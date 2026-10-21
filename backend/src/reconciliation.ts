@@ -1,98 +1,74 @@
-import type {
-  Baseline,
-  NormalizedTransaction,
-  ReconciliationDiff,
-  ReconciliationResult,
-} from "./models/index.js";
-import { reconstructState } from "./reconstruction.js";
+import type { Baseline, Transaction } from './parsers.js';
+import { applyTransaction, sortTransactions } from './reconstruction.js';
 
-const MINOR_SHARE_DIFF = 1;
-const MINOR_CASH_DIFF = 1.0;
+export type ReconciliationDiff = {
+  symbol: string;
+  expected: number;
+  actual: number;
+  difference: number;
+};
 
-// Reconcile a new baseline against reconstructed expected state.
-// expected_state = baselineA + transactions where baselineA.date < tx.date <= baselineB.date
+export type ReconciliationResult = {
+  baselineDate: string;
+  status: 'MATCH' | 'MINOR_MISMATCH' | 'MAJOR_MISMATCH';
+  holdingDiffs: ReconciliationDiff[];
+  cashDiff: number;
+  notes: string[];
+};
+
 export function reconcileBaseline(
-  baselineA: Baseline,
-  baselineB: Baseline,
-  transactions: NormalizedTransaction[]
+  previousBaseline: Baseline,
+  newBaseline: Baseline,
+  transactions: Transaction[],
 ): ReconciliationResult {
-  const relevantTransactions: NormalizedTransaction[] = [];
+  const sorted = sortTransactions(transactions.filter((tx) => tx.date > previousBaseline.date && tx.date <= newBaseline.date));
+  const state = {
+    holdings: { ...previousBaseline.holdings },
+    cash: previousBaseline.cash,
+  };
 
-  for (const tx of transactions) {
-    if (tx.date > baselineA.date && tx.date <= baselineB.date) {
-      relevantTransactions.push(tx);
-    }
-  }
-
-  const expectedState = reconstructState(baselineA, relevantTransactions);
-
-  const symbols = new Set<string>();
-
-  for (const symbol of Object.keys(expectedState.holdings)) {
-    symbols.add(symbol);
-  }
-
-  for (const symbol of Object.keys(baselineB.holdings)) {
-    symbols.add(symbol);
+  for (const tx of sorted) {
+    applyTransaction(state, tx);
   }
 
   const holdingDiffs: ReconciliationDiff[] = [];
+  const symbols = new Set([...Object.keys(state.holdings), ...Object.keys(newBaseline.holdings)]);
 
-  for (const symbol of symbols) {
-    const expected = expectedState.holdings[symbol] ?? 0;
-    const actual = baselineB.holdings[symbol] ?? 0;
+  for (const symbol of [...symbols].sort()) {
+    const expected = state.holdings[symbol] ?? 0;
+    const actual = newBaseline.holdings[symbol] ?? 0;
     const difference = actual - expected;
-
     if (difference !== 0) {
-      holdingDiffs.push({
-        symbol,
-        expected,
-        actual,
-        difference,
-      });
+      holdingDiffs.push({ symbol, expected, actual, difference });
     }
   }
 
-  const cashDiff = baselineB.cash - expectedState.cash;
+  const cashDiff = newBaseline.cash - state.cash;
+  const hasExactMatch = holdingDiffs.length === 0 && Math.abs(cashDiff) === 0;
+  const allHoldingsClose = holdingDiffs.every((entry) => Math.abs(entry.difference) <= 1);
+  const cashWithinMinor = Math.abs(cashDiff) <= 1;
 
-  const isMatch = holdingDiffs.length === 0 && Math.abs(cashDiff) === 0;
-
-  if (isMatch) {
-    return {
-      baselineDate: baselineB.date,
-      status: "MATCH",
-      holdingDiffs,
-      cashDiff,
-    };
+  let status: ReconciliationResult['status'] = 'MAJOR_MISMATCH';
+  if (hasExactMatch) {
+    status = 'MATCH';
+  } else if (allHoldingsClose && cashWithinMinor) {
+    status = 'MINOR_MISMATCH';
   }
 
-  let allHoldingDiffsMinor = true;
-
-  for (const diff of holdingDiffs) {
-    if (Math.abs(diff.difference) > MINOR_SHARE_DIFF) {
-      allHoldingDiffsMinor = false;
-      break;
-    }
-  }
-
-  const isMinor = allHoldingDiffsMinor && Math.abs(cashDiff) <= MINOR_CASH_DIFF;
-
-  if (isMinor) {
-    return {
-      baselineDate: baselineB.date,
-      status: "MINOR_MISMATCH",
-      holdingDiffs,
-      cashDiff,
-      notes: [
-        "Minor discrepancy detected. Likely due to rounding or missing small transactions.",
-      ],
-    };
+  const notes = [] as string[];
+  if (status === 'MATCH') {
+    notes.push('Portfolio matches the new baseline.');
+  } else if (status === 'MINOR_MISMATCH') {
+    notes.push('Minor discrepancy detected. Likely rounding or a small missing transaction.');
+  } else {
+    notes.push('Major discrepancy detected. Baseline may require user review.');
   }
 
   return {
-    baselineDate: baselineB.date,
-    status: "MAJOR_MISMATCH",
+    baselineDate: newBaseline.date,
+    status,
     holdingDiffs,
     cashDiff,
+    notes,
   };
 }

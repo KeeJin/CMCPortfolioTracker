@@ -60,7 +60,7 @@ Raw File → Extract Text → Parse Rows → Classify → Normalize → Validate
 
 **Internal System**:
 - Portfolio holdings values computed in USD (quantity × price USD from Yahoo Finance or baseline)
-- Cash flows (DEPOSIT/WITHDRAWAL) converted SGD → USD using USDSGD=X FX rate before TWR/IRR
+- Cash flows (DEPOSIT/WITHDRAWAL) converted SGD → USD using USDSGD=X FX rate before TWR calculations
 - Display: user can toggle between USD and SGD (multiply by current rate)
 
 ---
@@ -294,7 +294,7 @@ Wdl CHASSGSG         (Withdrawal from linked SGD account)
 * MUST NOT be counted as performance (no price impact)
 * MUST still update cash balance
 * **Amount is in SGD** (from debit/credit columns)
-* Later: convert SGD → USD using FX rates before TWR/IRR calculations
+* Later: convert SGD → USD using FX rates before TWR calculations
 
 ---
 
@@ -493,7 +493,7 @@ After transactions and baselines are parsed:
 
 * DEPOSIT/WITHDRAWAL `amount` (SGD) → USD using `USDSGD=X` historical rates
   * Formula: `amount_usd = amount_sgd / usd_sgd_rate`
-  * Applied before TWR/IRR calculations
+  * Applied before TWR calculations
   * Ensures performance metrics are in a single currency
 * Display layer: user toggles USD ↔ SGD by multiplying holdings_value_usd × current_fx_rate
 

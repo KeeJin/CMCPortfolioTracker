@@ -188,13 +188,14 @@ function getAnchorLabel(anchorType: PortfolioResponse['anchorType'] | PortfolioH
 async function getDashboardSnapshot(
   timeframe: PortfolioTimeframe,
   pricingMethod: PricingMethod,
-  includePreBaselineEstimates: boolean,
+  debugMode: boolean,
+  twrMode: 'invested_capital' | 'account_total',
 ): Promise<DashboardSnapshot> {
   const history = await fetchPortfolioHistory()
 
   const [portfolioResult, portfolioValueResult] = await Promise.allSettled([
     fetchPortfolio(),
-    fetchPortfolioValue(timeframe, pricingMethod, includePreBaselineEstimates),
+    fetchPortfolioValue(timeframe, pricingMethod, { debug: debugMode, twrMode }),
   ])
 
   return {
@@ -454,11 +455,13 @@ function ContributionChart({
   displayCurrency,
   usdSgdRate,
   timeframe,
+  portfolioGain,
 }: {
   contributions: Record<string, number>
   displayCurrency: DisplayCurrency
   usdSgdRate?: number | null
   timeframe: string
+  portfolioGain?: number
 }) {
   const entries = Object.entries(contributions)
     .map(([symbol, value]) => ({ symbol, value }))
@@ -475,6 +478,9 @@ function ContributionChart({
   const maxAbs = Math.max(...entries.map((e) => Math.abs(e.value)), 1)
   const totalGain = entries.reduce((s, e) => (e.value > 0 ? s + e.value : s), 0)
   const totalLoss = entries.reduce((s, e) => (e.value < 0 ? s + e.value : s), 0)
+  const netContribution = totalGain + totalLoss
+  const portfolioGainDifference =
+    typeof portfolioGain === 'number' ? netContribution - portfolioGain : undefined
 
   const ROW_H = 36
   const LABEL_W = 68
@@ -521,12 +527,19 @@ function ContributionChart({
           </p>
         </div>
         <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Net ({timeframe.toUpperCase()})</p>
-          <p className={`mt-1 text-lg font-semibold ${totalGain + totalLoss >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {fmtContrib(totalGain + totalLoss)}
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Start Holdings ({timeframe.toUpperCase()})</p>
+          <p className={`mt-1 text-lg font-semibold ${netContribution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {fmtContrib(netContribution)}
           </p>
         </div>
       </div>
+
+      {typeof portfolioGainDifference === 'number' && Math.abs(portfolioGainDifference) > 1 && (
+        <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+          This chart reflects only the price change on positions already held at the start of the period.
+          Cash flows, deposits, withdrawals, and new trades are excluded, so it can differ from the total portfolio gain.
+        </div>
+      )}
 
       {/* Horizontal bar chart */}
       <div className="overflow-x-auto rounded-2xl border border-white/10 bg-white/3 p-4">
@@ -645,9 +658,8 @@ function UploadModal({
 function App() {
   const [timeframe, setTimeframe] = useState<PortfolioTimeframe>('1y')
   const [pricingMethod, setPricingMethod] = useState<PricingMethod>('yahoo_finance')
-  const [includePreBaselineEstimates, setIncludePreBaselineEstimates] = useState(true)
+  const [twrMode, setTwrMode] = useState<'invested_capital' | 'account_total'>('invested_capital')
   const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency>('USD')
-  const [selectedChart, setSelectedChart] = useState<'holdings' | 'twr'>('holdings')
   const [baselineFile, setBaselineFile] = useState<File | null>(null)
   const [transactionFile, setTransactionFile] = useState<File | null>(null)
   const [baselineUpload, setBaselineUpload] = useState<UploadState<UploadBaselineResponse>>(EMPTY_UPLOAD_STATE)
@@ -657,6 +669,8 @@ function App() {
   const [portfolioValue, setPortfolioValue] = useState<PortfolioValueResponse | null>(null)
   const [portfolioLoading, setPortfolioLoading] = useState(true)
   const [portfolioError, setPortfolioError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null)
+  const [debugTwrPanel, setDebugTwrPanel] = useState(false)
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false)
   const [baselineModalOpen, setBaselineModalOpen] = useState(false)
   const [transactionsModalOpen, setTransactionsModalOpen] = useState(false)
@@ -694,11 +708,18 @@ function App() {
       const snapshot = await getDashboardSnapshot(
         timeframe,
         pricingMethod,
-        includePreBaselineEstimates,
+        debugTwrPanel,
+        twrMode,
       )
       setHistory(snapshot.history)
       setPortfolio(snapshot.portfolio)
       setPortfolioValue(snapshot.portfolioValue)
+      setLastUpdated(
+        new Intl.DateTimeFormat('en-SG', {
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        }).format(new Date()),
+      )
     } catch (error) {
       setHistory(null)
       setPortfolio(null)
@@ -718,7 +739,8 @@ function App() {
         const snapshot = await getDashboardSnapshot(
           timeframe,
           pricingMethod,
-          includePreBaselineEstimates,
+          debugTwrPanel,
+          twrMode,
         )
 
         if (cancelled) {
@@ -729,6 +751,12 @@ function App() {
         setPortfolio(snapshot.portfolio)
         setPortfolioValue(snapshot.portfolioValue)
         setPortfolioError(null)
+        setLastUpdated(
+          new Intl.DateTimeFormat('en-SG', {
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          }).format(new Date()),
+        )
       } catch (error) {
         if (cancelled) {
           return
@@ -750,7 +778,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [timeframe, pricingMethod, includePreBaselineEstimates])
+  }, [timeframe, pricingMethod, debugTwrPanel, twrMode])
 
   async function handleBaselineSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -828,29 +856,26 @@ function App() {
   const series = portfolioValue?.series ?? []
   const startHoldingsValue = series[0]?.holdingsValue
   const endHoldingsValue = series.length > 0 ? series[series.length - 1]?.holdingsValue : undefined
-  const startCashValue = series[0]?.cashValue
-  const endCashValue = series.length > 0 ? series[series.length - 1]?.cashValue : undefined
   const startTotalValue = series[0]?.totalValue
+  const endTotalValue = series.length > 0 ? series[series.length - 1]?.totalValue : undefined
   const holdingsValueChange =
     typeof startHoldingsValue === 'number' && typeof endHoldingsValue === 'number'
       ? endHoldingsValue - startHoldingsValue
       : undefined
-  const cashValueChange =
-    typeof startCashValue === 'number' && typeof endCashValue === 'number'
-      ? endCashValue - startCashValue
+  const totalValueChange =
+    typeof startTotalValue === 'number' && typeof endTotalValue === 'number'
+      ? endTotalValue - startTotalValue
       : undefined
-  const holdingsReturnContribution =
-    typeof holdingsValueChange === 'number' && typeof startTotalValue === 'number' && startTotalValue !== 0
-      ? holdingsValueChange / startTotalValue
-      : undefined
-  const cashReturnContribution =
-    typeof cashValueChange === 'number' && typeof startTotalValue === 'number' && startTotalValue !== 0
-      ? cashValueChange / startTotalValue
-      : undefined
-  const returnBreakdownTotal =
-    typeof holdingsReturnContribution === 'number' && typeof cashReturnContribution === 'number'
-      ? holdingsReturnContribution + cashReturnContribution
-      : undefined
+  const displayedTotalGainLoss =
+    typeof portfolioValue?.totalGainLoss === 'number'
+      ? portfolioValue.totalGainLoss
+      : totalValueChange
+  const displayedTotalGainLossPercent =
+    typeof displayedTotalGainLoss === 'number' &&
+    typeof startTotalValue === 'number' &&
+    startTotalValue !== 0
+      ? displayedTotalGainLoss / startTotalValue
+      : portfolioValue?.totalReturn
   const usdSgdRate = portfolioValue?.usdSgdRate ?? null
 
   const holdingsValueChangePercent =
@@ -858,12 +883,6 @@ function App() {
     typeof endHoldingsValue === 'number' &&
     startHoldingsValue !== 0
       ? (endHoldingsValue - startHoldingsValue) / startHoldingsValue
-      : undefined
-  const cashValueChangePercent =
-    typeof startCashValue === 'number' &&
-    typeof endCashValue === 'number' &&
-    startCashValue !== 0
-      ? (endCashValue - startCashValue) / startCashValue
       : undefined
 
   return (
@@ -921,6 +940,9 @@ function App() {
                 Anchor {history.currentAnchorDate}
               </span>
             )}
+            <span className="rounded-full border border-cyan-300/30 bg-cyan-500/10 px-3 py-1 text-cyan-100">
+              Last updated: {lastUpdated ?? '—'}
+            </span>
             {baselineUpload.result && (
               <span className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-3 py-1 text-emerald-100">
                 Baseline uploaded: {baselineUpload.result.baseline.date}
@@ -1102,15 +1124,37 @@ function App() {
                 </button>
               ))}
 
-              <label className="ml-auto flex items-center gap-2 rounded-full border border-amber-300/25 bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-100">
-                <input
-                  type="checkbox"
-                  checked={includePreBaselineEstimates}
-                  onChange={(event) => setIncludePreBaselineEstimates(event.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-amber-200/60 bg-slate-900 text-amber-300 focus:ring-amber-300"
-                />
-                Include pre-baseline estimates
-              </label>
+              <div className="h-4 w-px bg-white/15" />
+              <div className="flex overflow-hidden rounded-full border border-white/15 bg-slate-900/60 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setTwrMode('invested_capital')}
+                  className={`px-3 py-1.5 transition ${twrMode === 'invested_capital' ? 'bg-emerald-300 text-slate-950' : 'text-slate-100 hover:bg-white/10'}`}
+                >
+                  Active Positions TWR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTwrMode('account_total')}
+                  className={`px-3 py-1.5 transition ${twrMode === 'account_total' ? 'bg-cyan-300 text-slate-950' : 'text-slate-100 hover:bg-white/10'}`}
+                >
+                  Account TWR
+                </button>
+              </div>
+
+              <div className="h-4 w-px bg-white/15" />
+              <button
+                type="button"
+                onClick={() => setDebugTwrPanel((value) => !value)}
+                className={`rounded-full px-3 py-1.5 text-xs font-semibold tracking-wide transition ${
+                  debugTwrPanel
+                    ? 'bg-amber-300 text-slate-950'
+                    : 'border border-white/15 bg-slate-900/60 text-slate-100 hover:bg-white/10'
+                }`}
+              >
+                TWR Debug
+              </button>
+
             </div>
 
             {!portfolioValue && portfolioLoading && (
@@ -1135,20 +1179,8 @@ function App() {
                   </div>
                 )}
                 <div className={`space-y-5 transition-all duration-150 ${portfolioLoading ? 'pointer-events-none opacity-30 blur-[1px]' : ''}`}>
-                {portfolioValue.estimation?.enabled && (
-                  <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-                    Estimation mode enabled. Metrics before {portfolioValue.estimation.originalBaselineDate} are inferred from
-                    {` ${portfolioValue.estimation.knownPreBaselineTransactions} `}
-                    known pre-baseline transaction(s). Baseline-date onward remains authoritative.
-                  </div>
-                )}
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div
-                    className={`rounded-xl bg-white/95 p-4 text-slate-950 cursor-pointer select-none transition-all ${selectedChart === 'holdings' ? 'ring-2 ring-teal-500' : 'opacity-85 hover:opacity-100'}`}
-                    onClick={() => setSelectedChart('holdings')}
-                    title="Click to view holdings chart"
-                  >
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl bg-white/95 p-4 text-slate-950">
                     <MetricLabel
                       label="Holdings Value"
                       tooltip="Current market value of your holdings for the selected timeframe, shown in your chosen display currency."
@@ -1160,97 +1192,25 @@ function App() {
                   </div>
                   <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
                     <MetricLabel
-                      label="Total Return"
-                      tooltip="Simple change from first to last portfolio value in the selected timeframe. This is not cash-flow adjusted."
+                      label="Total Gain / Loss"
+                      tooltip="Absolute portfolio value change from the start to end of the selected timeframe."
                     />
-                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.totalReturn)}</p>
-                    <div className="mt-2 space-y-1 text-xs text-slate-400">
-                      <p>
-                        Holdings change: <span className="text-slate-200">{formatSignedPercent(holdingsValueChangePercent)}</span>
-                      </p>
-                      <p>
-                        Cash change: <span className="text-slate-200">{formatSignedPercent(cashValueChangePercent)}</span>
-                      </p>
-                      <p>
-                        Holdings contrib to total return: <span className="text-slate-200">{formatSignedPercent(holdingsReturnContribution)}</span>
-                      </p>
-                      <p>
-                        Cash contrib to total return: <span className="text-slate-200">{formatSignedPercent(cashReturnContribution)}</span>
-                      </p>
-                      <p>
-                        Sum check: <span className="text-slate-200">{formatPercent(returnBreakdownTotal)}</span>
-                      </p>
-                    </div>
+                    <p className="mt-2 text-xl font-semibold">{formatSignedCurrency(displayedTotalGainLoss, displayCurrency, usdSgdRate)}</p>
+                    <p className="mt-1 text-xs text-slate-300">{formatSignedPercent(displayedTotalGainLossPercent)}</p>
                   </div>
-                  <div
-                    className={`rounded-xl border p-4 text-white cursor-pointer select-none transition-all ${selectedChart === 'twr' ? 'border-indigo-400/60 bg-indigo-500/20 ring-2 ring-indigo-400' : 'border-white/10 bg-white/5 opacity-85 hover:opacity-100'}`}
-                    onClick={() => setSelectedChart('twr')}
-                    title="Click to view TWR chart"
-                  >
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
                     <MetricLabel
                       label="TWR"
                       tooltip="Time-Weighted Return. Measures investment performance excluding the impact of deposits and withdrawals."
                     />
                     <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.twr)}</p>
-                  </div>
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <MetricLabel
-                      label="IRR"
-                      tooltip="Money-Weighted Return (XIRR). Includes timing and size of deposits and withdrawals to reflect your personal return."
-                    />
-                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.irr)}</p>
-                  </div>
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <MetricLabel
-                      label="CAGR"
-                      tooltip="Compound Annual Growth Rate. Annualized TWR showing the equivalent yearly growth rate over the selected timeframe."
-                    />
-                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.cagr)}</p>
-                    {portfolioValue.benchmarkCagr !== undefined && portfolioValue.cagr !== undefined && (
-                      <p className={`mt-1 text-xs ${portfolioValue.cagr >= portfolioValue.benchmarkCagr ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        α {formatSignedPercent(portfolioValue.cagr - portfolioValue.benchmarkCagr)} vs VOO
-                      </p>
-                    )}
-                  </div>
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-white">
-                    <MetricLabel
-                      label="Volatility"
-                      tooltip="Annualized standard deviation of daily portfolio returns (×√252). Higher = more price variation."
-                    />
-                    <p className="mt-2 text-xl font-semibold">{formatPercent(portfolioValue.volatility)}</p>
-                    {portfolioValue.cagr !== undefined && portfolioValue.volatility !== undefined && portfolioValue.volatility > 0 && (
-                      <p className="mt-1 text-xs text-slate-400">
-                        Sharpe ≈ {(portfolioValue.cagr / portfolioValue.volatility).toFixed(2)}
-                      </p>
-                    )}
+                    <p className="mt-1 text-xs text-slate-300">
+                      {portfolioValue.twrMode === 'invested_capital'
+                        ? 'Mode: Active positions only (cash ignored)'
+                        : 'Mode: Account total (holdings + cash)'}
+                    </p>
                   </div>
                 </div>
-
-                {/* Benchmark comparison row */}
-                {(portfolioValue.benchmarkReturn !== undefined ||
-                  portfolioValue.benchmarkCagr !== undefined ||
-                  portfolioValue.benchmarkVolatility !== undefined) && (
-                  <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4">
-                    <p className="mb-3 text-xs uppercase tracking-[0.16em] text-amber-300">VOO Benchmark</p>
-                    <div className="grid grid-cols-3 gap-3">
-                      <div>
-                        <p className="text-xs text-slate-400">Return</p>
-                        <p className="mt-1 text-base font-semibold text-white">{formatSignedPercent(portfolioValue.benchmarkReturn)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-400">CAGR</p>
-                        <p className="mt-1 text-base font-semibold text-white">{formatPercent(portfolioValue.benchmarkCagr)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-400">Volatility</p>
-                        <p className="mt-1 text-base font-semibold text-white">{formatPercent(portfolioValue.benchmarkVolatility)}</p>
-                        {portfolioValue.benchmarkCagr !== undefined && portfolioValue.benchmarkVolatility !== undefined && portfolioValue.benchmarkVolatility > 0 && (
-                          <p className="mt-0.5 text-xs text-slate-500">Sharpe ≈ {(portfolioValue.benchmarkCagr / portfolioValue.benchmarkVolatility).toFixed(2)}</p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
 
                 {Array.isArray(portfolioValue.missingPriceSymbols) && portfolioValue.missingPriceSymbols.length > 0 && (
                   <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm text-amber-100">
@@ -1263,10 +1223,116 @@ function App() {
                   timeframe={portfolioValue.timeframe}
                   displayCurrency={displayCurrency}
                   usdSgdRate={usdSgdRate}
-                  mode={selectedChart}
-                  twrSeries={portfolioValue.twrSeries}
-                  benchmarkTwrSeries={portfolioValue.benchmarkTwrSeries}
                 />
+
+                {debugTwrPanel && portfolioValue.debug && (
+                  <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+                    <p className="text-xs uppercase tracking-[0.16em] text-amber-200">TWR Flow Diagnostics</p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <p>
+                        TWR (with flows): <span className="font-semibold">{formatPercent(portfolioValue.twr)}</span>
+                      </p>
+                      <p>
+                        Account TWR: <span className="font-semibold">{formatPercent(portfolioValue.accountTwr)}</span>
+                      </p>
+                      <p>
+                        Active Positions TWR: <span className="font-semibold">{formatPercent(portfolioValue.investedCapitalTwr)}</span>
+                      </p>
+                      <p>
+                        TWR (without flows): <span className="font-semibold">{formatPercent(portfolioValue.debug.twrWithoutExternalFlows)}</span>
+                      </p>
+                      <p>
+                        Flow impact: <span className="font-semibold">{formatSignedPercent(portfolioValue.debug.twrFlowImpact)}</span>
+                      </p>
+                      <p>
+                        External flows counted: <span className="font-semibold">{portfolioValue.debug.externalFlowCount}</span>
+                      </p>
+                    </div>
+
+                    {portfolioValue.debug.externalFlows.length > 0 ? (
+                      <div className="mt-3 overflow-hidden rounded-lg border border-amber-200/30">
+                        <table className="min-w-full divide-y divide-amber-200/20 text-left text-xs">
+                          <thead className="bg-amber-300/20 text-amber-100">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">Date</th>
+                              <th className="px-3 py-2 font-medium text-right">USD Amount</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-amber-200/15">
+                            {portfolioValue.debug.externalFlows.map((flow, index) => (
+                              <tr key={`${flow.date}-${flow.amount}-${index}`}>
+                                <td className="px-3 py-2">{flow.date}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{formatSignedCurrency(flow.amount, 'USD', null)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-xs text-amber-100/90">No external flows were counted for this timeframe.</p>
+                    )}
+
+                    {portfolioValue.debug.investedCapitalFlows && portfolioValue.debug.investedCapitalFlows.length > 0 && (
+                      <div className="mt-3 overflow-hidden rounded-lg border border-emerald-200/30">
+                        <table className="min-w-full divide-y divide-emerald-200/20 text-left text-xs">
+                          <thead className="bg-emerald-300/20 text-emerald-100">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">Trade Flow Date</th>
+                              <th className="px-3 py-2 font-medium text-right">Invested Capital Flow (USD)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-emerald-200/15">
+                            {portfolioValue.debug.investedCapitalFlows.map((flow, index) => (
+                              <tr key={`${flow.date}-${flow.amount}-${index}`}>
+                                <td className="px-3 py-2">{flow.date}</td>
+                                <td className="px-3 py-2 text-right tabular-nums">{formatSignedCurrency(flow.amount, 'USD', null)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {portfolioValue.debug.twrResidualBreakdown && (
+                      <div className="mt-4 overflow-hidden rounded-lg border border-amber-200/30">
+                        <table className="min-w-full divide-y divide-amber-200/20 text-left text-xs">
+                          <thead className="bg-amber-300/20 text-amber-100">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">Residual Bucket</th>
+                              <th className="px-3 py-2 font-medium text-right">Contribution</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-amber-200/15">
+                            <tr>
+                              <td className="px-3 py-2">Stock price + dividends (model)</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-emerald-200">
+                                {formatSignedPercent(portfolioValue.debug.twrResidualBreakdown.symbolContributionTotal)}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2">Cash carry contribution</td>
+                              <td className="px-3 py-2 text-right tabular-nums">
+                                {formatSignedPercent(portfolioValue.debug.twrResidualBreakdown.cashCarryContribution)}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2">Trade timing / rebalancing interaction</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-amber-100">
+                                {formatSignedPercent(portfolioValue.debug.twrResidualBreakdown.tradeTimingContribution)}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2">Small remainder</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-amber-200/90">
+                                {formatSignedPercent(portfolioValue.debug.twrResidualBreakdown.residualRemainder)}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             ) : (
@@ -1285,8 +1351,8 @@ function App() {
                 <div>
                   <h2 className="text-xl font-semibold text-white">Contribution Analysis</h2>
                   <p className="mt-0.5 text-xs text-slate-400">
-                    Price-return contribution per position for the selected timeframe ({timeframe.toUpperCase()}).
-                    Shows how much each holding's price movement added or removed in {displayCurrency}.
+                    Price-return contribution from positions held at the start of the selected timeframe ({timeframe.toUpperCase()}).
+                    Shows how start-of-period holdings price movement added or removed in {displayCurrency}.
                   </p>
                 </div>
               </div>
@@ -1295,7 +1361,56 @@ function App() {
                 displayCurrency={displayCurrency}
                 usdSgdRate={usdSgdRate}
                 timeframe={timeframe}
+                portfolioGain={totalValueChange}
               />
+
+              {portfolioValue.twrSymbolContributions && Object.keys(portfolioValue.twrSymbolContributions).length > 0 && (
+                <div className="mt-8">
+                  <h3 className="mb-1 text-base font-semibold text-slate-200">TWR Attribution by Stock</h3>
+                  <p className="mb-4 text-xs text-slate-400">
+                    Contribution in percentage points to timeframe TWR. Positive means the stock lifted TWR; negative means it dragged performance.
+                  </p>
+
+                  <div className="overflow-hidden rounded-xl border border-white/10">
+                    <table className="min-w-full divide-y divide-white/10 text-left text-sm">
+                      <thead className="bg-white/5 text-slate-300">
+                        <tr>
+                          <th className="px-4 py-3 font-medium">Symbol</th>
+                          <th className="px-4 py-3 font-medium text-right">Contribution (pp)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/10 text-slate-100">
+                        {Object.entries(portfolioValue.twrSymbolContributions)
+                          .sort(([, left], [, right]) => Math.abs(right) - Math.abs(left))
+                          .map(([symbol, contribution]) => (
+                            <tr key={symbol}>
+                              <td className="px-4 py-3 font-medium">{symbol}</td>
+                              <td className={`px-4 py-3 text-right tabular-nums ${contribution >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                                {formatSignedPercent(contribution)}
+                              </td>
+                            </tr>
+                          ))}
+
+                        {typeof portfolioValue.twrUnattributedContribution === 'number' && (
+                          <tr>
+                            <td className="px-4 py-3 font-medium text-amber-200">Unattributed / Residual</td>
+                            <td className={`px-4 py-3 text-right tabular-nums ${portfolioValue.twrUnattributedContribution >= 0 ? 'text-amber-200' : 'text-amber-300'}`}>
+                              {formatSignedPercent(portfolioValue.twrUnattributedContribution)}
+                            </td>
+                          </tr>
+                        )}
+
+                        <tr>
+                          <td className="px-4 py-3 font-semibold text-slate-200">Total TWR</td>
+                          <td className="px-4 py-3 text-right font-semibold tabular-nums text-cyan-200">
+                            {formatPercent(portfolioValue.twr)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {portfolioValue.realizedGains && Object.keys(portfolioValue.realizedGains).length > 0 && (
                 <div className="mt-8">
@@ -1309,6 +1424,7 @@ function App() {
                     displayCurrency={displayCurrency}
                     usdSgdRate={usdSgdRate}
                     timeframe="all"
+                    portfolioGain={totalValueChange}
                   />
                 </div>
               )}

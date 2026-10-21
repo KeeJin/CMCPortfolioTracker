@@ -26,6 +26,14 @@ export type UploadTransactionsResponse = {
   added: number
   duplicates: number
   parseErrors: number
+  diagnostics?: {
+    rowsConsidered: number
+    acceptedRows: number
+    unknownTypeRows: number
+    heuristicClassifiedRows: number
+    unknownTypeRate: number
+    heuristicClassifiedRate: number
+  }
   errors?: Array<{
     row: unknown
     reason: string
@@ -65,8 +73,14 @@ export type PortfolioValueResponse = {
   startDate: string
   endDate: string
   totalReturn?: number
+  /** Gain/loss in USD after removing external deposits/withdrawals for timeframe comparability. */
+  totalGainLoss?: number
+  /** Net external cash flow (deposits - withdrawals) over the timeframe. */
+  netExternalFlow?: number
   twr?: number
-  irr?: number
+  twrMode?: 'invested_capital' | 'account_total'
+  accountTwr?: number
+  investedCapitalTwr?: number
   /** CAGR: annualized TWR for the selected timeframe. */
   cagr?: number
   /** Annualized volatility (std-dev of daily returns × √252) for the timeframe. */
@@ -84,24 +98,56 @@ export type PortfolioValueResponse = {
   benchmarkCagr?: number
   /** VOO annualized volatility for the timeframe. */
   benchmarkVolatility?: number
-  estimation?: {
-    enabled: boolean
-    inferredBaselineDate: string
-    originalBaselineDate: string
-    knownPreBaselineTransactions: number
-  }
   /** Latest market value per held symbol (symbol → USD value). */
   positionValues?: Record<string, number>
   /** Per-symbol price-return contribution over the timeframe (symbol → USD gain/loss). */
   positionContributions?: Record<string, number>
   /** Per-symbol realized gains since baseline, using average cost basis with Yahoo USD prices. */
   realizedGains?: Record<string, number>
+  /** Per-symbol contribution to TWR over timeframe (decimal, e.g. 0.012 = +1.2pp). */
+  twrSymbolContributions?: Record<string, number>
+  /** Portion of TWR not attributed to symbol-level price/dividend effects (cash drag, timing residual). */
+  twrUnattributedContribution?: number
+  twrResidualBreakdown?: {
+    symbolContributionTotal: number
+    cashCarryContribution: number
+    tradeTimingContribution: number
+    residualRemainder: number
+  }
   usdSgdRate?: number | null
   missingPriceSymbols?: string[]
   livePriceFetch?: {
     fetchedSymbols: string[]
     failedSymbols: string[]
   } | null
+  debug?: {
+    timeframe: PortfolioTimeframe
+    pricePointCount: number
+    sampledPointCount: number
+    twrWithoutExternalFlows: number
+    twrFlowImpact: number
+    externalFlowCount: number
+    externalFlows: Array<{
+      date: string
+      amount: number
+    }>
+    investedCapitalFlowCount?: number
+    investedCapitalFlows?: Array<{
+      date: string
+      amount: number
+    }>
+    twrResidualBreakdown?: {
+      symbolContributionTotal: number
+      cashCarryContribution: number
+      tradeTimingContribution: number
+      residualRemainder: number
+    }
+    parserRowsConsidered?: number
+    parserUnknownTypeRows?: number
+    parserHeuristicClassifiedRows?: number
+    parserUnknownTypeRate?: number
+    parserHeuristicClassifiedRate?: number
+  }
 }
 
 export type UploadHistoryItem = {

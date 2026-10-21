@@ -1,113 +1,87 @@
-import type { NormalizedTransaction } from "./models/index.js";
-import type { Baseline } from "./models/index.js";
-import type { Upload } from "./models/index.js";
-import { readJson, writeJson } from "./persistence.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// ─── In-memory store ──────────────────────────────────────────────────────────
-// Keyed by transaction ID for O(1) deduplication.
-// Baselines and upload actions are append-only.
+import type { Baseline, Transaction, Upload } from './parsers.js';
 
-const transactions = new Map<string, NormalizedTransaction>();
-const baselines: Baseline[] = [];
-const uploads: Upload[] = [];
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.resolve(__dirname, '../data');
 
-// ─── Persistence ──────────────────────────────────────────────────────────────
+const state = {
+  baselines: [] as Baseline[],
+  transactions: [] as Transaction[],
+  uploads: [] as Upload[],
+};
 
-function saveStore(): void {
-  writeJson("baselines.json", baselines);
-  writeJson("transactions.json", Array.from(transactions.values()));
-  writeJson("uploads.json", uploads);
-}
-
-// Loads persisted data from disk into the in-memory store.
-// Must be called once at server startup before handling any requests.
-export function initStore(): void {
-  const savedBaselines = readJson<Baseline[]>("baselines.json", []);
-  const savedTransactions = readJson<NormalizedTransaction[]>("transactions.json", []);
-  const savedUploads = readJson<Upload[]>("uploads.json", []);
-
-  for (const b of savedBaselines) {
-    baselines.push(b);
-  }
-  for (const tx of savedTransactions) {
-    transactions.set(tx.id, tx);
-  }
-  for (const u of savedUploads) {
-    uploads.push(u);
-  }
-
-  console.log(
-    `[store] Loaded from disk: ${baselines.length} baselines, ${transactions.size} transactions, ${uploads.length} uploads`
-  );
-}
-
-// ─── Transactions ─────────────────────────────────────────────────────────────
-
-export function addTransactions(incoming: NormalizedTransaction[]): {
-  added: number;
-  duplicates: number;
-} {
-  let added = 0;
-  let duplicates = 0;
-
-  for (const tx of incoming) {
-    if (transactions.has(tx.id)) {
-      duplicates++;
-    } else {
-      transactions.set(tx.id, tx);
-      added++;
+function readJsonFile<T>(filePath: string, fallback: T): T {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    if (!content.trim()) {
+      return fallback;
     }
+    return JSON.parse(content) as T;
+  } catch {
+    return fallback;
   }
-
-  if (added > 0) {
-    saveStore();
-  }
-
-  return { added, duplicates };
 }
 
-export function getAllTransactions(): NormalizedTransaction[] {
-  return Array.from(transactions.values());
+function writeJsonFile<T>(filePath: string, value: T) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-export function clearTransactions(): void {
-  transactions.clear();
-  saveStore();
+function ensureDataDir() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// ─── Baseline ─────────────────────────────────────────────────────────────────
-
-export function setBaseline(b: Baseline): void {
-  baselines.push(b);
-  saveStore();
-}
-
-export function getBaseline(): Baseline | null {
-  if (baselines.length === 0) {
-    return null;
-  }
-
-  let latest = baselines[0]!;
-
-  for (let index = 1; index < baselines.length; index += 1) {
-    const candidate = baselines[index]!;
-    if (candidate.date >= latest.date) {
-      latest = candidate;
-    }
-  }
-
-  return latest;
+export function initStore() {
+  ensureDataDir();
+  state.baselines = readJsonFile(path.join(DATA_DIR, 'baselines.json'), [] as Baseline[]);
+  state.transactions = readJsonFile(path.join(DATA_DIR, 'transactions.json'), [] as Transaction[]);
+  state.uploads = readJsonFile(path.join(DATA_DIR, 'uploads.json'), [] as Upload[]);
 }
 
 export function getAllBaselines(): Baseline[] {
-  return [...baselines];
+  return [...state.baselines].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export function recordUpload(upload: Upload): void {
-  uploads.push(upload);
-  saveStore();
+export function getAllTransactions(): Transaction[] {
+  return [...state.transactions].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export function getUploads(): Upload[] {
-  return [...uploads];
+export function getAllUploads(): Upload[] {
+  return [...state.uploads].sort((a, b) => a.uploadedAt.localeCompare(b.uploadedAt));
+}
+
+export function addBaseline(baseline: Baseline) {
+  const exists = state.baselines.some((item) => item.id === baseline.id);
+  if (!exists) {
+    state.baselines.push(baseline);
+    state.baselines.sort((a, b) => a.date.localeCompare(b.date));
+    writeJsonFile(path.join(DATA_DIR, 'baselines.json'), state.baselines);
+  }
+  return baseline;
+}
+
+export function addTransactions(items: Transaction[]) {
+  const seen = new Set(state.transactions.map((tx) => tx.id));
+  const newItems = items.filter((item) => !seen.has(item.id));
+
+  for (const item of newItems) {
+    state.transactions.push(item);
+    seen.add(item.id);
+  }
+
+  state.transactions.sort((a, b) => a.date.localeCompare(b.date));
+  writeJsonFile(path.join(DATA_DIR, 'transactions.json'), state.transactions);
+
+  return {
+    added: newItems.length,
+    duplicates: items.length - newItems.length,
+  };
+}
+
+export function addUpload(upload: Upload) {
+  state.uploads.unshift(upload);
+  writeJsonFile(path.join(DATA_DIR, 'uploads.json'), state.uploads);
+  return upload;
 }

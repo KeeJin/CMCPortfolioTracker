@@ -1,117 +1,62 @@
-import type { Baseline, NormalizedTransaction, PortfolioState } from "./models/index.js";
+import type { Baseline, Transaction } from './parsers.js';
 
-// Apply one normalized transaction to a mutable portfolio state.
-export function applyTransaction(
-  state: PortfolioState,
-  tx: NormalizedTransaction
-): PortfolioState {
-  if (tx.type === "BUY") {
-    if (tx.symbol === null || tx.quantity === null) {
-      return state;
-    }
+export type PortfolioState = {
+  holdings: Record<string, number>;
+  cash: number;
+};
 
-    const current = state.holdings[tx.symbol] ?? 0;
-    state.holdings[tx.symbol] = current + tx.quantity;
-    state.cash = state.cash + tx.amount;
-    state.date = tx.date;
-    return state;
-  }
-
-  if (tx.type === "SELL") {
-    if (tx.symbol === null || tx.quantity === null) {
-      return state;
-    }
-
-    const current = state.holdings[tx.symbol] ?? 0;
-    const next = current - tx.quantity;
-
-    if (next === 0) {
-      delete state.holdings[tx.symbol];
-    } else {
-      state.holdings[tx.symbol] = next;
-    }
-
-    state.cash = state.cash + tx.amount;
-    state.date = tx.date;
-    return state;
-  }
-
-  if (tx.type === "DIVIDEND") {
-    state.cash = state.cash + tx.amount;
-    state.date = tx.date;
-    return state;
-  }
-
-  if (tx.type === "DEPOSIT") {
-    state.cash = state.cash + tx.amount;
-    state.date = tx.date;
-    return state;
-  }
-
-  if (tx.type === "WITHDRAWAL") {
-    state.cash = state.cash + tx.amount;
-    state.date = tx.date;
-    return state;
-  }
-
-  if (tx.type === "SPLIT") {
-    if (tx.symbol === null || tx.splitRatio === null || tx.splitRatio <= 0) {
-      return state;
-    }
-
-    const current = state.holdings[tx.symbol] ?? 0;
-    if (current === 0) {
-      return state;
-    }
-
-    state.holdings[tx.symbol] = current * tx.splitRatio;
-    state.date = tx.date;
-    return state;
-  }
-
-  return state;
+export function sortTransactions(transactions: Transaction[]) {
+  return [...transactions].sort((a, b) => a.date.localeCompare(b.date));
 }
 
-// Reconstruct state from baseline + transactions.
-// Rules:
-// 1) Deduplicate transactions by id (first seen wins)
-// 2) Sort ascending by date
-// 3) Preserve original order for same-date transactions
-export function reconstructState(
-  baseline: Baseline,
-  transactions: NormalizedTransaction[]
-): PortfolioState {
+export function applyTransaction(state: PortfolioState, tx: Transaction) {
+  switch (tx.type) {
+    case 'BUY': {
+      const quantity = tx.quantity ?? 0;
+      state.holdings[tx.symbol ?? ''] = (state.holdings[tx.symbol ?? ''] ?? 0) + quantity;
+      state.cash -= Math.abs(tx.amount);
+      break;
+    }
+    case 'SELL': {
+      const quantity = tx.quantity ?? 0;
+      state.holdings[tx.symbol ?? ''] = (state.holdings[tx.symbol ?? ''] ?? 0) - quantity;
+      state.cash += Math.abs(tx.amount);
+      break;
+    }
+    case 'DIVIDEND': {
+      state.cash += Math.abs(tx.amount);
+      break;
+    }
+    case 'DEPOSIT': {
+      state.cash += Math.abs(tx.amount);
+      break;
+    }
+    case 'WITHDRAWAL': {
+      state.cash -= Math.abs(tx.amount);
+      break;
+    }
+    case 'SPLIT': {
+      if (tx.symbol && tx.splitRatio) {
+        state.holdings[tx.symbol] = (state.holdings[tx.symbol] ?? 0) * tx.splitRatio;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+export function reconstructState(anchor: Baseline | null, transactions: Transaction[]): PortfolioState {
   const state: PortfolioState = {
-    date: baseline.date,
-    holdings: { ...baseline.holdings },
-    cash: baseline.cash,
+    holdings: anchor ? { ...anchor.holdings } : {},
+    cash: anchor ? anchor.cash : 0,
   };
 
-  const seenIds = new Set<string>();
-  const deduplicated: Array<{ tx: NormalizedTransaction; originalIndex: number }> = [];
-
-  for (let i = 0; i < transactions.length; i += 1) {
-    const tx = transactions[i]!;
-
-    if (seenIds.has(tx.id)) {
+  for (const tx of sortTransactions(transactions)) {
+    if (tx.date < (anchor?.date ?? '1970-01-01')) {
       continue;
     }
-
-    seenIds.add(tx.id);
-    deduplicated.push({ tx, originalIndex: i });
-  }
-
-  deduplicated.sort((a, b) => {
-    if (a.tx.date < b.tx.date) return -1;
-    if (a.tx.date > b.tx.date) return 1;
-
-    if (a.originalIndex < b.originalIndex) return -1;
-    if (a.originalIndex > b.originalIndex) return 1;
-    return 0;
-  });
-
-  for (const item of deduplicated) {
-    applyTransaction(state, item.tx);
+    applyTransaction(state, tx);
   }
 
   return state;

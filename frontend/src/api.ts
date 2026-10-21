@@ -58,13 +58,18 @@ export function fetchPortfolio() {
 export function fetchPortfolioValue(
   timeframe: PortfolioTimeframe,
   pricingMethod: PricingMethod,
-  includePreBaselineEstimates: boolean = false,
+  options?: { debug?: boolean; twrMode?: 'invested_capital' | 'account_total' },
 ) {
   const params = new URLSearchParams({
     pricingMethod,
     timeframe,
-    includePreBaselineEstimates: includePreBaselineEstimates ? 'true' : 'false',
   })
+  if (options?.twrMode) {
+    params.set('twrMode', options.twrMode)
+  }
+  if (options?.debug) {
+    params.set('debug', '1')
+  }
   return apiRequest<PortfolioValueResponse>(`/api/portfolio/value?${params.toString()}`)
 }
 

@@ -4,7 +4,7 @@ import baselineRouter from "./routes/baseline.js";
 import portfolioRouter from "./routes/portfolio.js";
 import { initStore } from "./store.js";
 import { loadPriceCache } from "./priceCache.js";
-import { startEagerLoading } from "./eagerLoader.js";
+import { startEagerLoading, startScheduledMarketRefresh } from "./eagerLoader.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -27,4 +27,5 @@ app.listen(port, () => {
   console.log(`Backend server is running on port ${port}`);
   // Kick off background price prefetch for all timeframes after server is ready.
   startEagerLoading();
+  startScheduledMarketRefresh();
 });

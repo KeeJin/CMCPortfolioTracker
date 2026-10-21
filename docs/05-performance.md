@@ -7,9 +7,10 @@ This document defines how portfolio performance is calculated.
 The system must support:
 
 * Portfolio value over time
-* Time-weighted return (TWR)
-* Money-weighted return (IRR)
+* Time-weighted return (TWR) as optional performance context
 * Basic benchmarking (optional)
+
+IRR is intentionally excluded from the current product scope.
 
 ---
 
@@ -170,68 +171,20 @@ TWR = (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
 * Use portfolio value before and after each cash flow
 * Do NOT treat SPLIT as an external cash flow
 
-### Timeframe-Specific TWR and IRR
+### Timeframe-Specific TWR
 
 When the API returns a timeframe-specific chart:
 
 * first build performance on the full underlying history
 * then sample the value series for the requested timeframe
 * then filter deposit/withdrawal cash flows to that sampled date range
-* finally compute TWR and IRR for that timeframe only
+* finally compute TWR for that timeframe only
 
-This avoids two known errors:
-
-* metrics becoming identical to naive total return because deposit/withdrawal dates were lost during sampling
-* metrics staying constant across all timeframes because cash flows were not filtered to the selected range
+This avoids a known issue where metrics become identical to naive total return because deposit/withdrawal dates were lost during sampling.
 
 ---
 
-## 6. Money-Weighted Return (IRR)
-
-### Purpose
-
-Measures return considering timing of cash flows.
-
----
-
-### Cash Flow Construction
-
-Build series:
-
-```ts
-cashflows = [
-  { date: t0, amount: -initial_value },
-  { date: t1, amount: deposit },
-  { date: t2, amount: withdrawal },
-  ...
-  { date: tn, amount: +final_value }
-]
-```
-
----
-
-### Calculation
-
-Compute IRR:
-
-```ts
-NPV = 0 = Σ (cashflow_i / (1 + r)^(time_i))
-```
-
-Solve for `r`.
-
----
-
-### Notes
-
-* Use XIRR (date-aware IRR)
-* Include ALL external cash flows
-* Final portfolio value is treated as positive cash flow
-* Do NOT include SPLIT as a cash flow
-
----
-
-## 7. Dividend Handling
+## 6. Dividend Handling
 
 Dividends:
 
@@ -301,7 +254,7 @@ If starting value = 0:
 Frequent deposits/withdrawals:
 
 * TWR remains valid
-* IRR becomes more meaningful
+* external cash flow timing is still tracked in the value series, but IRR is deliberately out of scope for this product
 
 ---
 
@@ -330,7 +283,6 @@ Example:
 
   totalReturn: number,      // simple return
   twr: number,              // time-weighted return
-  irr: number,              // money-weighted return
 
   series: PortfolioValuePoint[]
 }
@@ -426,6 +378,5 @@ Performance must reflect:
 This is why:
 
 * TWR ignores deposits
-* IRR includes them
 
 Both metrics are required for a complete view.

@@ -1,77 +1,95 @@
-import { Router } from "express";
-import multer from "multer";
-import { parseBaselineText } from "../parsers/baseline.js";
-import { setBaseline, getAllBaselines, getAllTransactions, recordUpload } from "../store.js";
-import { randomUUID } from "crypto";
-import { reconcileBaseline } from "../reconciliation.js";
-import { findPreviousBaseline } from "../portfolioState.js";
-import { extractTextFromUploadedFile } from "../parsers/upload.js";
+import { Router } from 'express';
+import multer from 'multer';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+import { parseBaselineText } from '../parsers.js';
+import { addBaseline, addUpload, getAllBaselines, getAllTransactions } from '../store.js';
+import { reconcileBaseline } from '../reconciliation.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// POST /api/baseline
-//
-// Accepts a multipart upload containing the baseline PDF.
+function readTextFromUpload(file: Express.Multer.File): string {
+  const isPdf = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf') || file.buffer.includes(Buffer.from('%PDF'));
 
-router.post("/", upload.single("file"), async (req, res) => {
-  const file = req.file;
-  if (!file) {
-    res.status(400).json({ error: "multipart field 'file' is required" });
-    return;
+  if (!isPdf) {
+    return file.buffer.toString('utf8');
   }
 
-  const source = file.originalname || "baseline-upload";
-  const id = randomUUID();
-
-  let text: string;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmc-baseline-'));
+  const tempPath = path.join(tempDir, file.originalname || 'baseline.pdf');
+  fs.writeFileSync(tempPath, file.buffer);
 
   try {
-    text = await extractTextFromUploadedFile(file);
+    const stdout = execFileSync('pdftotext', ['-layout', tempPath, '-'], { encoding: 'utf8' });
+    return stdout;
+  } catch {
+    try {
+      const stdout = execFileSync('pdftotext', [tempPath, '-'], { encoding: 'utf8' });
+      return stdout;
+    } catch {
+      return file.buffer.toString('utf8');
+    }
+  }
+}
+
+router.post('/', upload.single('file'), (req, res) => {
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: 'A baseline file is required.' });
+    return;
+  }
+
+  try {
+    const text = readTextFromUpload(file);
+    const parsed = parseBaselineText(text, file.originalname);
+
+    if (!parsed.ok || !parsed.baseline) {
+      res.status(400).json({ error: parsed.error ?? 'Unable to parse the baseline file.' });
+      return;
+    }
+
+    const allBaselines = getAllBaselines();
+    const latestBaseline = allBaselines.length > 0 ? allBaselines[allBaselines.length - 1] : null;
+    const baseline = { ...parsed.baseline, id: `baseline-${parsed.baseline.date}-${Date.now()}` };
+
+    addBaseline(baseline);
+    addUpload({
+      id: `upload-${Date.now()}`,
+      type: 'BASELINE',
+      filename: file.originalname,
+      uploadedAt: new Date().toISOString(),
+      dateRange: { start: baseline.date, end: baseline.date },
+      metadata: { baselineDate: baseline.date },
+    });
+
+    let reconciliation: { status: 'MATCH' | 'MINOR_MISMATCH' | 'MAJOR_MISMATCH'; notes?: string[] } | undefined;
+
+    if (latestBaseline) {
+      const relevantTransactions = getAllTransactions().filter(
+        (tx) => tx.date > latestBaseline.date && tx.date <= baseline.date,
+      );
+      reconciliation = reconcileBaseline(latestBaseline, baseline, relevantTransactions);
+    }
+
+    res.status(201).json({
+      baseline,
+      reconciliation: reconciliation
+        ? { status: reconciliation.status, notes: reconciliation.notes }
+        : undefined,
+    });
   } catch (error) {
-    res.status(422).json({ error: error instanceof Error ? error.message : "Failed to read upload" });
-    return;
+    const message = error instanceof Error ? error.message : 'Unexpected baseline parsing failure.';
+    res.status(400).json({ error: message });
   }
-
-  const result = parseBaselineText(text, id, source);
-
-  if (!result.ok) {
-    res.status(422).json({ error: result.error.reason });
-    return;
-  }
-
-  const previousBaseline = findPreviousBaseline(getAllBaselines(), result.baseline);
-  const reconciliation = previousBaseline
-    ? reconcileBaseline(previousBaseline, result.baseline, getAllTransactions())
-    : undefined;
-
-  setBaseline(result.baseline);
-  recordUpload({
-    id: randomUUID(),
-    type: "BASELINE",
-    filename: source || `baseline-${result.baseline.date}`,
-    uploadedAt: new Date().toISOString(),
-    dateRange: {
-      start: result.baseline.date,
-      end: result.baseline.date,
-    },
-    metadata: {
-      baselineDate: result.baseline.date,
-      reconciliationStatus: reconciliation?.status,
-    },
-  });
-
-  res.status(200).json({ baseline: result.baseline, reconciliation });
 });
 
-// GET /api/baseline — useful for verifying stored state
-router.get("/", (_req, res) => {
+router.get('/', (_req, res) => {
   const baselines = getAllBaselines();
-  if (baselines.length === 0) {
-    res.status(404).json({ error: "No baselines stored" });
-    return;
-  }
-  res.status(200).json({ baselines });
+  res.json({ baselines });
 });
 
 export default router;
