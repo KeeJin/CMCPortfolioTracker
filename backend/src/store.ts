@@ -112,14 +112,20 @@ export async function hydrateStoreFromSupabase() {
   writeLocalStoreState();
 }
 
-export function initStore() {
+export async function initStore() {
   ensureDataDir();
   state.baselines = readJsonFile(path.join(DATA_DIR, 'baselines.json'), [] as Baseline[]);
   state.transactions = readJsonFile(path.join(DATA_DIR, 'transactions.json'), [] as Transaction[]);
   state.uploads = readJsonFile(path.join(DATA_DIR, 'uploads.json'), [] as Upload[]);
 
   if (isSupabaseConfigured()) {
-    void hydrateStoreFromSupabase();
+    console.log('[store] Hydrating from Supabase cache_documents');
+    await hydrateStoreFromSupabase();
+    console.log('[store] Supabase hydration complete', {
+      baselines: state.baselines.length,
+      transactions: state.transactions.length,
+      uploads: state.uploads.length,
+    });
   }
 }
 

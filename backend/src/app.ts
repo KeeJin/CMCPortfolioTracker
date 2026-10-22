@@ -50,12 +50,14 @@ app.use('/api/baseline', baselineRouter);
 app.use('/api/portfolio', portfolioRouter);
 
 // Load persisted store and price cache before accepting requests.
-initStore();
-void loadPriceCache();
+void (async () => {
+  await initStore();
+  void loadPriceCache();
 
-app.listen(port, () => {
-  console.log(`Backend server is running on port ${port}`);
-  // Kick off background price prefetch for all timeframes after server is ready.
-  startEagerLoading();
-  startScheduledMarketRefresh();
-});
+  app.listen(port, () => {
+    console.log(`Backend server is running on port ${port}`);
+    // Kick off background price prefetch for all timeframes after server is ready.
+    startEagerLoading();
+    startScheduledMarketRefresh();
+  });
+})();
