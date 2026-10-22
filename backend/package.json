@@ -29,6 +29,7 @@
   "type": "module",
   "dependencies": {
     "@types/multer": "^2.1.0",
+    "@supabase/supabase-js": "^2.53.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
