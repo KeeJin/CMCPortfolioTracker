@@ -1,4 +1,6 @@
 import type {
+  ManualTradeRequest,
+  ManualTradeResponse,
   PortfolioHistoryResponse,
   PortfolioTimeframe,
   PortfolioResponse,
@@ -48,6 +50,16 @@ export function uploadTransactions(file: File) {
   return apiRequest<UploadTransactionsResponse>('/api/transactions', {
     method: 'POST',
     body: createUploadBody(file),
+  })
+}
+
+export function createManualTrade(payload: ManualTradeRequest) {
+  return apiRequest<ManualTradeResponse>('/api/transactions/manual', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
   })
 }
 

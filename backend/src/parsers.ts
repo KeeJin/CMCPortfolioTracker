@@ -17,6 +17,18 @@ export type Transaction = {
   splitRatio: number | null;
   rawDescription?: string;
   source: string;
+  instrumentType?: 'EQUITY' | 'OPTION';
+  underlyingSymbol?: string | null;
+  optionType?: 'CALL' | 'PUT';
+  strikePrice?: number | null;
+  expiryDate?: string | null;
+  contractMultiplier?: number | null;
+  ownershipShare?: number | null;
+  valuationMethod?: 'LINEAR' | null;
+  valuationStartDate?: string | null;
+  valuationStartPrice?: number | null;
+  valuationEndDate?: string | null;
+  valuationEndPrice?: number | null;
 };
 
 export type Baseline = {
@@ -103,6 +115,10 @@ function parseCurrency(value: string | null | undefined): number | null {
     .replace(/Dr$/i, '')
     .trim();
   if (!cleaned || cleaned === '—') return null;
+  if (/[.,]$/.test(cleaned)) {
+    return null;
+  }
+
   const num = Number(cleaned);
   return Number.isFinite(num) ? num : null;
 }
@@ -192,12 +208,12 @@ function extractSymbol(description: string): string | null {
 }
 
 function extractQuantity(description: string): number | null {
-  const matches = description.match(/\b(?:Bght|Bought|Sold)\s+(\d+(?:\.\d+)?)\s+[A-Z0-9.-]+:US\b/i);
+  const matches = description.match(/\b(?:Bght|Bought|Sold)\s*(\d+(?:\.\d+)?)\s*[A-Z0-9.-]+:US\b/i);
   if (matches) {
     return Number(matches[1]);
   }
 
-  const sellMatch = description.match(/\bSold\s+(\d+(?:\.\d+)?)\s+[A-Z0-9.-]+:US\b/i);
+  const sellMatch = description.match(/\bSold\s*(\d+(?:\.\d+)?)\s*[A-Z0-9.-]+:US\b/i);
   if (sellMatch) {
     return Number(sellMatch[1]);
   }
@@ -246,11 +262,21 @@ function parseRow(row: Record<string, string | number | null | undefined>): Pars
   const symbol = extractSymbol(description);
   const quantity = initialType === 'BUY' || initialType === 'SELL' ? extractQuantity(description) : null;
   const price = initialType === 'BUY' || initialType === 'SELL' ? extractPrice(description) : null;
+  const computedTradeValue = (quantity !== null && price !== null) ? roundCurrencyValue(quantity * price) : null;
 
   let amount = credit !== null ? credit : debit !== null ? -debit : 0;
-  if ((initialType === 'BUY' || initialType === 'SELL') && quantity !== null && price !== null) {
-    const tradeValue = roundCurrencyValue(quantity * price);
-    amount = initialType === 'BUY' ? -tradeValue : tradeValue;
+  if (initialType === 'BUY' || initialType === 'SELL') {
+    if (initialType === 'BUY' && debit !== null && computedTradeValue !== null) {
+      const delta = Math.abs(debit - computedTradeValue);
+      const tolerance = Math.max(5, Math.abs(computedTradeValue) * 0.05);
+      amount = delta <= tolerance ? -debit : -computedTradeValue;
+    } else if (initialType === 'SELL' && credit !== null && computedTradeValue !== null) {
+      const delta = Math.abs(credit - computedTradeValue);
+      const tolerance = Math.max(5, Math.abs(computedTradeValue) * 0.05);
+      amount = delta <= tolerance ? credit : computedTradeValue;
+    } else if (computedTradeValue !== null) {
+      amount = initialType === 'BUY' ? -computedTradeValue : computedTradeValue;
+    }
   }
   const normalized = description.toLowerCase();
 

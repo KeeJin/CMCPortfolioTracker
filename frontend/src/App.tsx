@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  createManualTrade,
   fetchPortfolio,
   fetchPortfolioHistory,
   fetchPortfolioValue,
@@ -8,6 +9,8 @@ import {
   uploadTransactions,
 } from './api'
 import type {
+  ManualTradeRequest,
+  ManualTradeResponse,
   PortfolioHistoryResponse,
   PortfolioTimeframe,
   PortfolioResponse,
@@ -41,6 +44,46 @@ type DashboardSnapshot = {
   history: PortfolioHistoryResponse
   portfolio: PortfolioResponse | null
   portfolioValue: PortfolioValueResponse | null
+}
+
+type ManualTradeFormState = {
+  date: string
+  type: 'BUY' | 'SELL'
+  instrumentType: 'EQUITY' | 'OPTION'
+  symbol: string
+  quantity: string
+  price: string
+  underlyingSymbol: string
+  optionType: 'CALL' | 'PUT'
+  strikePrice: string
+  expiryDate: string
+  contractMultiplier: string
+  ownershipShare: string
+  useLinearValuation: boolean
+  valuationStartDate: string
+  valuationStartAmount: string
+  valuationEndDate: string
+  valuationEndAmount: string
+}
+
+const DEFAULT_MANUAL_TRADE_FORM: ManualTradeFormState = {
+  date: new Date().toISOString().slice(0, 10),
+  type: 'BUY',
+  instrumentType: 'EQUITY',
+  symbol: '',
+  quantity: '1',
+  price: '',
+  underlyingSymbol: '',
+  optionType: 'CALL',
+  strikePrice: '',
+  expiryDate: '',
+  contractMultiplier: '100',
+  ownershipShare: '1.0',
+  useLinearValuation: false,
+  valuationStartDate: '',
+  valuationStartAmount: '',
+  valuationEndDate: '',
+  valuationEndAmount: '',
 }
 
 const TIMEFRAME_OPTIONS: Array<{ value: PortfolioTimeframe; label: string }> = [
@@ -674,6 +717,9 @@ function App() {
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false)
   const [baselineModalOpen, setBaselineModalOpen] = useState(false)
   const [transactionsModalOpen, setTransactionsModalOpen] = useState(false)
+  const [manualTradeModalOpen, setManualTradeModalOpen] = useState(false)
+  const [manualTradeUpload, setManualTradeUpload] = useState<UploadState<ManualTradeResponse>>(EMPTY_UPLOAD_STATE)
+  const [manualTradeForm, setManualTradeForm] = useState<ManualTradeFormState>(DEFAULT_MANUAL_TRADE_FORM)
   const [holdingsSort, setHoldingsSort] = useState<{ key: HoldingsSortKey; direction: SortDirection }>({
     key: 'value',
     direction: 'desc',
@@ -822,8 +868,111 @@ function App() {
     }
   }
 
+  async function handleManualTradeSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    const quantity = Number(manualTradeForm.quantity)
+    const price = Number(manualTradeForm.price)
+    if (!manualTradeForm.date || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price < 0) {
+      setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Enter a valid date, quantity, and price.' })
+      return
+    }
+
+    if (manualTradeForm.instrumentType === 'EQUITY' && !manualTradeForm.symbol.trim()) {
+      setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Symbol is required for equity trades.' })
+      return
+    }
+
+    if (manualTradeForm.instrumentType === 'OPTION') {
+      if (!manualTradeForm.underlyingSymbol.trim() || !manualTradeForm.expiryDate || !manualTradeForm.strikePrice) {
+        setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Underlying, expiry date, and strike are required for option trades.' })
+        return
+      }
+
+      const ownershipShare = Number(manualTradeForm.ownershipShare)
+      if (!Number.isFinite(ownershipShare) || ownershipShare <= 0 || ownershipShare > 1) {
+        setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Ownership share must be > 0 and <= 1.' })
+        return
+      }
+
+      if (manualTradeForm.useLinearValuation) {
+        const vStart = Number(manualTradeForm.valuationStartAmount)
+        const vEnd = Number(manualTradeForm.valuationEndAmount)
+        if (!manualTradeForm.valuationStartDate || !manualTradeForm.valuationEndDate || !Number.isFinite(vStart) || !Number.isFinite(vEnd)) {
+          setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Linear valuation needs open and close dates with valid booked amounts.' })
+          return
+        }
+
+        if (vStart < 0 || vEnd < 0) {
+          setManualTradeUpload({ ...EMPTY_UPLOAD_STATE, error: 'Booked amounts must be zero or greater.' })
+          return
+        }
+      }
+    }
+
+    const payload: ManualTradeRequest = {
+      date: manualTradeForm.date,
+      type: manualTradeForm.type,
+      instrumentType: manualTradeForm.instrumentType,
+      symbol: manualTradeForm.instrumentType === 'EQUITY' ? manualTradeForm.symbol.trim().toUpperCase() : undefined,
+      underlyingSymbol: manualTradeForm.instrumentType === 'OPTION' ? manualTradeForm.underlyingSymbol.trim().toUpperCase() : undefined,
+      optionType: manualTradeForm.instrumentType === 'OPTION' ? manualTradeForm.optionType : undefined,
+      strikePrice: manualTradeForm.instrumentType === 'OPTION' ? Number(manualTradeForm.strikePrice) : undefined,
+      expiryDate: manualTradeForm.instrumentType === 'OPTION' ? manualTradeForm.expiryDate : undefined,
+      quantity,
+      price,
+      contractMultiplier:
+        manualTradeForm.instrumentType === 'OPTION'
+          ? Number(manualTradeForm.contractMultiplier || '100')
+          : undefined,
+      ownershipShare:
+        manualTradeForm.instrumentType === 'OPTION'
+          ? Number(manualTradeForm.ownershipShare || '1')
+          : undefined,
+      valuationMethod:
+        manualTradeForm.instrumentType === 'OPTION' && manualTradeForm.useLinearValuation
+          ? 'LINEAR'
+          : undefined,
+      valuationStartDate:
+        manualTradeForm.instrumentType === 'OPTION' && manualTradeForm.useLinearValuation
+          ? manualTradeForm.valuationStartDate
+          : undefined,
+      valuationStartAmount:
+        manualTradeForm.instrumentType === 'OPTION' && manualTradeForm.useLinearValuation
+          ? Number(manualTradeForm.valuationStartAmount)
+          : undefined,
+      valuationEndDate:
+        manualTradeForm.instrumentType === 'OPTION' && manualTradeForm.useLinearValuation
+          ? manualTradeForm.valuationEndDate
+          : undefined,
+      valuationEndAmount:
+        manualTradeForm.instrumentType === 'OPTION' && manualTradeForm.useLinearValuation
+          ? Number(manualTradeForm.valuationEndAmount)
+          : undefined,
+      source: 'manual-ui',
+    }
+
+    setManualTradeUpload({ loading: true, error: null, result: null, fileName: 'manual-entry' })
+
+    try {
+      const result = await createManualTrade(payload)
+      setManualTradeUpload({ loading: false, error: null, result, fileName: 'manual-entry' })
+      setManualTradeModalOpen(false)
+      setManualTradeForm(DEFAULT_MANUAL_TRADE_FORM)
+      void refreshDashboard()
+    } catch (error) {
+      setManualTradeUpload({
+        loading: false,
+        error: `Manual trade failed: ${getErrorMessage(error)}`,
+        result: null,
+        fileName: 'manual-entry',
+      })
+    }
+  }
+
   const holdings = portfolio
     ? Object.entries(portfolio.state.holdings)
+        .filter(([, quantity]) => quantity > 0)
         .sort(([leftSymbol, leftQuantity], [rightSymbol, rightQuantity]) => {
           if (holdingsSort.key === 'symbol') {
             const symbolComparison = leftSymbol.localeCompare(rightSymbol)
@@ -885,17 +1034,29 @@ function App() {
               <h1 className="mt-1 text-2xl font-semibold text-white">Portfolio Dashboard</h1>
             </div>
 
-            <div className="relative">
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setActionsMenuOpen((open) => !open)}
-                className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/20"
+                onClick={() => {
+                  setActionsMenuOpen(false)
+                  setManualTradeModalOpen(true)
+                }}
+                className="rounded-full border border-cyan-300/40 bg-cyan-400/15 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-300/25"
               >
-                Actions
+                Add Manual Trade
               </button>
 
-              {actionsMenuOpen && (
-                <div className="absolute right-0 z-20 mt-2 w-56 rounded-xl border border-white/10 bg-slate-900 p-2 shadow-2xl">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setActionsMenuOpen((open) => !open)}
+                  className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/20"
+                >
+                  Actions
+                </button>
+
+                {actionsMenuOpen && (
+                  <div className="absolute right-0 z-20 mt-2 w-56 rounded-xl border border-white/10 bg-slate-900 p-2 shadow-2xl">
                   <button
                     type="button"
                     className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-100 transition hover:bg-white/10"
@@ -916,8 +1077,19 @@ function App() {
                   >
                     Upload Transactions
                   </button>
-                </div>
-              )}
+                  <button
+                    type="button"
+                    className="mt-1 w-full rounded-lg px-3 py-2 text-left text-sm text-slate-100 transition hover:bg-white/10"
+                    onClick={() => {
+                      setActionsMenuOpen(false)
+                      setManualTradeModalOpen(true)
+                    }}
+                  >
+                    Add Manual Trade
+                  </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -941,6 +1113,11 @@ function App() {
             {transactionUpload.result && (
               <span className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-3 py-1 text-emerald-100">
                 Transactions imported: {transactionUpload.result.added}
+              </span>
+            )}
+            {manualTradeUpload.result && (
+              <span className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-3 py-1 text-emerald-100">
+                Manual trade added: {manualTradeUpload.result.transaction.symbol ?? manualTradeUpload.result.transaction.id}
               </span>
             )}
           </div>
@@ -1334,8 +1511,11 @@ function App() {
         </main>
 
         {/* Contribution analysis — full-width section below the two-column grid */}
-        {portfolioValue?.positionContributions &&
-          Object.keys(portfolioValue.positionContributions).length > 0 && (
+        {portfolioValue && (
+          (portfolioValue.positionContributions && Object.keys(portfolioValue.positionContributions).length > 0)
+          || (portfolioValue.realizedGains && Object.keys(portfolioValue.realizedGains).length > 0)
+          || (portfolioValue.twrSymbolContributions && Object.keys(portfolioValue.twrSymbolContributions).length > 0)
+        ) && (
             <section className={`mt-6 rounded-2xl border border-white/10 bg-slate-900/65 p-6 shadow-xl backdrop-blur-sm transition-all duration-150 ${portfolioLoading ? 'pointer-events-none opacity-30 blur-[1px]' : ''}`}>
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div>
@@ -1346,13 +1526,15 @@ function App() {
                   </p>
                 </div>
               </div>
-              <ContributionChart
-                contributions={portfolioValue.positionContributions}
-                displayCurrency={displayCurrency}
-                usdSgdRate={usdSgdRate}
-                timeframe={timeframe}
-                portfolioGain={totalValueChange}
-              />
+              {portfolioValue.positionContributions && Object.keys(portfolioValue.positionContributions).length > 0 && (
+                <ContributionChart
+                  contributions={portfolioValue.positionContributions}
+                  displayCurrency={displayCurrency}
+                  usdSgdRate={usdSgdRate}
+                  timeframe={timeframe}
+                  portfolioGain={totalValueChange}
+                />
+              )}
 
               {portfolioValue.twrSymbolContributions && Object.keys(portfolioValue.twrSymbolContributions).length > 0 && (
                 <div className="mt-8">
@@ -1496,6 +1678,236 @@ function App() {
             className="rounded-full bg-cyan-300 px-5 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {transactionUpload.loading ? 'Uploading...' : 'Upload Transactions'}
+          </button>
+        </form>
+      </UploadModal>
+
+      <UploadModal
+        open={manualTradeModalOpen}
+        title="Add Manual Trade"
+        onClose={() => {
+          if (!manualTradeUpload.loading) {
+            setManualTradeModalOpen(false)
+          }
+        }}
+      >
+        <form onSubmit={handleManualTradeSubmit} className="space-y-4">
+          <p className="rounded-lg border border-white/15 bg-slate-900/60 p-3 text-xs text-slate-300">
+            Manual-entry monetary fields use SGD.
+          </p>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-sm text-slate-200">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Date</span>
+              <input
+                type="date"
+                value={manualTradeForm.date}
+                onChange={(event) => setManualTradeForm((current) => ({ ...current, date: event.target.value }))}
+                className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+              />
+            </label>
+
+            <label className="text-sm text-slate-200">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Side</span>
+              <select
+                value={manualTradeForm.type}
+                onChange={(event) => setManualTradeForm((current) => ({ ...current, type: event.target.value as 'BUY' | 'SELL' }))}
+                className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+              >
+                <option value="BUY">BUY</option>
+                <option value="SELL">SELL</option>
+              </select>
+            </label>
+
+            <label className="text-sm text-slate-200 sm:col-span-2">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Instrument</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setManualTradeForm((current) => ({ ...current, instrumentType: 'EQUITY' }))}
+                  className={`rounded-full px-3 py-1.5 text-xs font-semibold ${manualTradeForm.instrumentType === 'EQUITY' ? 'bg-cyan-300 text-slate-950' : 'border border-white/15 text-slate-100'}`}
+                >
+                  Equity
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setManualTradeForm((current) => ({ ...current, instrumentType: 'OPTION' }))}
+                  className={`rounded-full px-3 py-1.5 text-xs font-semibold ${manualTradeForm.instrumentType === 'OPTION' ? 'bg-cyan-300 text-slate-950' : 'border border-white/15 text-slate-100'}`}
+                >
+                  Option
+                </button>
+              </div>
+            </label>
+
+            {manualTradeForm.instrumentType === 'EQUITY' ? (
+              <label className="text-sm text-slate-200 sm:col-span-2">
+                <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Symbol</span>
+                <input
+                  type="text"
+                  value={manualTradeForm.symbol}
+                  onChange={(event) => setManualTradeForm((current) => ({ ...current, symbol: event.target.value.toUpperCase() }))}
+                  className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                  placeholder="AAPL"
+                />
+              </label>
+            ) : (
+              <>
+                <label className="text-sm text-slate-200">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Underlying</span>
+                  <input
+                    type="text"
+                    value={manualTradeForm.underlyingSymbol}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, underlyingSymbol: event.target.value.toUpperCase() }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                    placeholder="TSLA"
+                  />
+                </label>
+                <label className="text-sm text-slate-200">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Option Type</span>
+                  <select
+                    value={manualTradeForm.optionType}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, optionType: event.target.value as 'CALL' | 'PUT' }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                  >
+                    <option value="CALL">Call</option>
+                    <option value="PUT">Put</option>
+                  </select>
+                </label>
+                <label className="text-sm text-slate-200">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Strike</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={manualTradeForm.strikePrice}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, strikePrice: event.target.value }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                    placeholder="300"
+                  />
+                </label>
+                <label className="text-sm text-slate-200">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Expiry</span>
+                  <input
+                    type="date"
+                    value={manualTradeForm.expiryDate}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, expiryDate: event.target.value }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                  />
+                </label>
+                <label className="text-sm text-slate-200 sm:col-span-2">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Contract Multiplier</span>
+                  <input
+                    type="number"
+                    step="1"
+                    value={manualTradeForm.contractMultiplier}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, contractMultiplier: event.target.value }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                  />
+                </label>
+
+                <label className="text-sm text-slate-200 sm:col-span-2">
+                  <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Ownership Share</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.0001"
+                    value={manualTradeForm.ownershipShare}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, ownershipShare: event.target.value }))}
+                    className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                  />
+                  <p className="mt-1 text-xs text-slate-400">1.0 means full ownership, 0.5 means half ownership.</p>
+                </label>
+
+                <label className="flex items-center gap-2 text-sm text-slate-200 sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={manualTradeForm.useLinearValuation}
+                    onChange={(event) => setManualTradeForm((current) => ({ ...current, useLinearValuation: event.target.checked }))}
+                  />
+                  <span>Use manual linear valuation (open to close interpolation)</span>
+                </label>
+
+                {manualTradeForm.useLinearValuation && (
+                  <>
+                    <label className="text-sm text-slate-200">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Open Date</span>
+                      <input
+                        type="date"
+                        value={manualTradeForm.valuationStartDate}
+                        onChange={(event) => setManualTradeForm((current) => ({ ...current, valuationStartDate: event.target.value }))}
+                        className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                      />
+                    </label>
+                    <label className="text-sm text-slate-200">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Open Booked Amount (SGD)</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={manualTradeForm.valuationStartAmount}
+                        onChange={(event) => setManualTradeForm((current) => ({ ...current, valuationStartAmount: event.target.value }))}
+                        className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                      />
+                    </label>
+                    <label className="text-sm text-slate-200">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Close Date</span>
+                      <input
+                        type="date"
+                        value={manualTradeForm.valuationEndDate}
+                        onChange={(event) => setManualTradeForm((current) => ({ ...current, valuationEndDate: event.target.value }))}
+                        className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                      />
+                    </label>
+                    <label className="text-sm text-slate-200">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Close Booked Amount (SGD)</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={manualTradeForm.valuationEndAmount}
+                        onChange={(event) => setManualTradeForm((current) => ({ ...current, valuationEndAmount: event.target.value }))}
+                        className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+                      />
+                    </label>
+                  </>
+                )}
+              </>
+            )}
+
+            <label className="text-sm text-slate-200">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Quantity</span>
+              <input
+                type="number"
+                step="0.0001"
+                value={manualTradeForm.quantity}
+                onChange={(event) => setManualTradeForm((current) => ({ ...current, quantity: event.target.value }))}
+                className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+              />
+            </label>
+            <label className="text-sm text-slate-200">
+              <span className="mb-1 block text-xs uppercase tracking-[0.14em] text-slate-400">Trade Price (SGD)</span>
+              <input
+                type="number"
+                step="0.0001"
+                value={manualTradeForm.price}
+                onChange={(event) => setManualTradeForm((current) => ({ ...current, price: event.target.value }))}
+                className="w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-slate-100"
+              />
+            </label>
+          </div>
+
+          {manualTradeUpload.error && (
+            <div className="rounded-lg border border-rose-400/30 bg-rose-500/10 p-3 text-sm text-rose-100">
+              {manualTradeUpload.error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={manualTradeUpload.loading}
+            className="rounded-full bg-cyan-300 px-5 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {manualTradeUpload.loading ? 'Saving...' : 'Save Manual Trade'}
           </button>
         </form>
       </UploadModal>

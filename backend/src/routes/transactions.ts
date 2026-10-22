@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { parseTransactionText } from '../parsers.js';
+import { buildManualTransaction } from '../manualTrades.js';
 import { addTransactions, addUpload, getAllTransactions } from '../store.js';
 
 const router = Router();
@@ -83,6 +84,97 @@ router.post('/', upload.single('file'), (req, res) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected transaction parsing failure.';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post('/manual', (req, res) => {
+  const payload = req.body ?? {};
+  console.info('[manual-entry] Received submission', {
+    date: payload.date,
+    type: payload.type,
+    instrumentType: payload.instrumentType,
+    symbol: payload.symbol,
+    underlyingSymbol: payload.underlyingSymbol,
+    quantity: payload.quantity,
+    price: payload.price,
+    contractMultiplier: payload.contractMultiplier,
+    ownershipShare: payload.ownershipShare,
+    valuationMethod: payload.valuationMethod,
+    valuationStartDate: payload.valuationStartDate,
+    valuationStartPrice: payload.valuationStartPrice,
+    valuationStartAmount: payload.valuationStartAmount,
+    valuationEndDate: payload.valuationEndDate,
+    valuationEndPrice: payload.valuationEndPrice,
+    valuationEndAmount: payload.valuationEndAmount,
+    source: payload.source,
+  });
+
+  try {
+    const tx = buildManualTransaction({
+      date: payload.date,
+      type: payload.type,
+      instrumentType: payload.instrumentType,
+      symbol: payload.symbol,
+      underlyingSymbol: payload.underlyingSymbol,
+      optionType: payload.optionType,
+      strikePrice: payload.strikePrice,
+      expiryDate: payload.expiryDate,
+      quantity: payload.quantity,
+      price: payload.price,
+      amount: payload.amount,
+      contractMultiplier: payload.contractMultiplier,
+      ownershipShare: payload.ownershipShare,
+      valuationMethod: payload.valuationMethod,
+      valuationStartDate: payload.valuationStartDate,
+      valuationStartPrice: payload.valuationStartPrice,
+      valuationStartAmount: payload.valuationStartAmount,
+      valuationEndDate: payload.valuationEndDate,
+      valuationEndPrice: payload.valuationEndPrice,
+      valuationEndAmount: payload.valuationEndAmount,
+      source: payload.source ?? 'manual-entry',
+    });
+
+    console.info('[manual-entry] Built transaction', {
+      id: tx.id,
+      date: tx.date,
+      type: tx.type,
+      symbol: tx.symbol,
+      quantity: tx.quantity,
+      price: tx.price,
+      amount: tx.amount,
+      valuationMethod: tx.valuationMethod,
+      valuationStartDate: tx.valuationStartDate,
+      valuationStartPrice: tx.valuationStartPrice,
+      valuationEndDate: tx.valuationEndDate,
+      valuationEndPrice: tx.valuationEndPrice,
+      source: tx.source,
+    });
+
+    const result = addTransactions([tx]);
+    addUpload({
+      id: `manual-${Date.now()}`,
+      type: 'TRANSACTIONS',
+      filename: `manual-${tx.symbol ?? 'trade'}.json`,
+      uploadedAt: new Date().toISOString(),
+      dateRange: { start: tx.date, end: tx.date },
+      metadata: {
+        transactionCount: result.added,
+        source: 'manual-entry',
+      },
+    });
+
+    res.status(201).json({
+      transaction: tx,
+      added: result.added,
+      duplicates: result.duplicates,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unexpected manual transaction failure.';
+    console.error('[manual-entry] Submission failed', {
+      error: message,
+      payload,
+    });
     res.status(400).json({ error: message });
   }
 });

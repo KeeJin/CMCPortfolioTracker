@@ -40,6 +40,44 @@ export type UploadTransactionsResponse = {
   }>
 }
 
+export type ManualTradeRequest = {
+  date: string
+  type: 'BUY' | 'SELL'
+  instrumentType: 'EQUITY' | 'OPTION'
+  symbol?: string
+  underlyingSymbol?: string
+  optionType?: 'CALL' | 'PUT'
+  strikePrice?: number
+  expiryDate?: string
+  quantity: number
+  price: number
+  contractMultiplier?: number
+  ownershipShare?: number
+  valuationMethod?: 'LINEAR'
+  valuationStartDate?: string
+  valuationStartPrice?: number
+  valuationStartAmount?: number
+  valuationEndDate?: string
+  valuationEndPrice?: number
+  valuationEndAmount?: number
+  source?: string
+}
+
+export type ManualTradeResponse = {
+  transaction: {
+    id: string
+    date: string
+    type: 'BUY' | 'SELL' | 'DIVIDEND' | 'DEPOSIT' | 'WITHDRAWAL' | 'SPLIT'
+    symbol: string | null
+    quantity: number | null
+    price: number | null
+    amount: number
+    source: string
+  }
+  added: number
+  duplicates: number
+}
+
 export type PortfolioResponse = {
   anchorType: 'BASELINE' | 'TRANSACTIONS_ONLY'
   baselineDate: string

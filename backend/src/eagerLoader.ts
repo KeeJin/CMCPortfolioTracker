@@ -100,13 +100,28 @@ async function runEagerLoad(): Promise<void> {
     splitResult.splits
   );
 
+  const manualLinearOptionSymbols = new Set(
+    enrichedTransactions
+      .filter((tx) => tx.instrumentType === 'OPTION' && tx.valuationMethod === 'LINEAR' && tx.symbol)
+      .map((tx) => tx.symbol as string)
+  );
+
   const state = reconstructState(anchor.baseline, enrichedTransactions);
   const symbols = Object.entries(state.holdings)
     .filter(([, qty]) => qty !== 0)
-    .map(([symbol]) => symbol);
+    .map(([symbol]) => symbol)
+    .filter((symbol) => !manualLinearOptionSymbols.has(symbol));
+
+  const skippedSymbols = Object.entries(state.holdings)
+    .filter(([, qty]) => qty !== 0)
+    .map(([symbol]) => symbol)
+    .filter((symbol) => manualLinearOptionSymbols.has(symbol));
 
   if (symbols.length === 0) {
-    console.log("[eagerLoader] No active holdings, skipping prefetch");
+    console.log("[eagerLoader] No active non-manual-option holdings, skipping Yahoo prefetch");
+    if (skippedSymbols.length > 0) {
+      console.log(`[eagerLoader] Skipped manual-linear option symbol(s): ${skippedSymbols.join(', ')}`);
+    }
     return;
   }
   const orderedWindows = getMissingPreloadWindows(symbols, new Date());
@@ -121,6 +136,9 @@ async function runEagerLoad(): Promise<void> {
     `[eagerLoader] Prefetching ${symbols.length} symbol(s) across ${orderedWindows.length} timeframe windows` 
   );
   console.log(`[eagerLoader] Symbols: ${symbols.join(', ')}`);
+  if (skippedSymbols.length > 0) {
+    console.log(`[eagerLoader] Skipped manual-linear option symbol(s): ${skippedSymbols.join(', ')}`);
+  }
 
   let totalFetched = 0;
   let totalFailed = 0;

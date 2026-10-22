@@ -6,12 +6,18 @@ import type { Request, Response } from 'express';
 import { getAllBaselines, getAllTransactions, getAllUploads } from '../store.js';
 import { getPortfolioAnchor } from '../portfolioState.js';
 import { applyTransaction, reconstructState, sortTransactions } from '../reconstruction.js';
-import { fetchYahooFinanceHistoricalPrices, fetchYahooFinanceLatestPrices, lastLivePriceSyncAt } from '../pricing.js';
-import { mergeMarketSplitTransactions } from '../marketSplits.js';
+import {
+  fetchYahooFinanceHistoricalPrices,
+  fetchYahooFinanceLatestPrices,
+  fetchYahooFinanceStockSplits,
+  lastLivePriceSyncAt,
+} from '../pricing.js';
+import { collectTrackedSymbols, mergeMarketSplitTransactions } from '../marketSplits.js';
 import { getCachedPricesForSymbol } from '../priceCache.js';
 import { convertSgdToUsd, fetchUsdSgdHistory } from '../fx.js';
 import type { Transaction } from '../parsers.js';
 import type { PricePoint } from '../pricing.js';
+import { buildManualLinearOptionSeries } from '../manualOptionValuation.js';
 
 const router = Router();
 
@@ -269,6 +275,107 @@ function buildFilledSymbolPriceMap(
   return filled;
 }
 
+function getOppositeTradeType(type: Transaction['type']): Transaction['type'] {
+  return type === 'SELL' ? 'BUY' : 'SELL';
+}
+
+export function expandManualLinearOptionTransactions(
+  transactions: Transaction[],
+  asOfDate: string = new Date().toISOString().slice(0, 10),
+): Transaction[] {
+  const sorted = sortTransactions(transactions);
+  const expanded: Transaction[] = [];
+
+  for (const tx of sorted) {
+    const isLinearOption = tx.instrumentType === 'OPTION'
+      && tx.valuationMethod === 'LINEAR'
+      && (tx.type === 'BUY' || tx.type === 'SELL');
+
+    if (!isLinearOption) {
+      expanded.push(tx);
+      continue;
+    }
+
+    if (!tx.symbol || !tx.quantity || tx.quantity <= 0 || !tx.valuationStartDate || !tx.valuationEndDate) {
+      expanded.push(tx);
+      continue;
+    }
+
+    const valuationStartDate = tx.valuationStartDate;
+    const valuationEndDate = tx.valuationEndDate;
+    if (valuationEndDate < valuationStartDate) {
+      expanded.push(tx);
+      continue;
+    }
+
+    const multiplier = Number(tx.contractMultiplier ?? 100);
+    const startPrice = Number(tx.valuationStartPrice);
+    const endPrice = Number(tx.valuationEndPrice);
+    if (!Number.isFinite(multiplier) || multiplier <= 0) continue;
+    if (!Number.isFinite(startPrice) || startPrice < 0) continue;
+    if (!Number.isFinite(endPrice) || endPrice < 0) continue;
+
+    const quantity = Math.abs(tx.quantity);
+    const openAmountAbs = quantity * startPrice * multiplier;
+    const openAmount = tx.type === 'SELL' ? openAmountAbs : -openAmountAbs;
+
+    expanded.push({
+      ...tx,
+      id: `manual-open-${tx.id}`,
+      date: valuationStartDate,
+      quantity,
+      price: startPrice,
+      amount: openAmount,
+      source: `${tx.source ?? 'manual-entry'}:auto-open`,
+      rawDescription: `Auto-open ${tx.symbol} from valuation start date`,
+    });
+
+    if (valuationEndDate > asOfDate) {
+      continue;
+    }
+
+    const closeType = getOppositeTradeType(tx.type);
+    const closeQuantity = quantity;
+    const closeAmountAbs = closeQuantity * endPrice * multiplier;
+    const closeAmount = closeType === 'SELL' ? closeAmountAbs : -closeAmountAbs;
+
+    expanded.push({
+      id: `manual-close-${tx.id}`,
+      date: valuationEndDate,
+      type: closeType,
+      symbol: tx.symbol,
+      quantity: closeQuantity,
+      price: endPrice,
+      amount: closeAmount,
+      splitRatio: null,
+      source: `${tx.source ?? 'manual-entry'}:auto-close`,
+      rawDescription: `Auto-close ${tx.symbol} at valuation end date`,
+      instrumentType: 'OPTION',
+      underlyingSymbol: tx.underlyingSymbol ?? null,
+      optionType: tx.optionType,
+      strikePrice: tx.strikePrice ?? null,
+      expiryDate: tx.expiryDate ?? null,
+      contractMultiplier: multiplier,
+      ownershipShare: tx.ownershipShare ?? null,
+      valuationMethod: tx.valuationMethod,
+      valuationStartDate: tx.valuationStartDate ?? null,
+      valuationStartPrice: tx.valuationStartPrice ?? null,
+      valuationEndDate,
+      valuationEndPrice: tx.valuationEndPrice ?? null,
+    });
+  }
+
+  return expanded;
+}
+
+export function deriveManualOptionCloseTransactions(
+  transactions: Transaction[],
+  asOfDate: string = new Date().toISOString().slice(0, 10),
+): Transaction[] {
+  return expandManualLinearOptionTransactions(transactions, asOfDate)
+    .filter((tx) => String(tx.source ?? '').includes(':auto-close'));
+}
+
 function computeTwrSymbolContributions(
   symbols: string[],
   rangeDates: string[],
@@ -384,6 +491,48 @@ function computeTwrResidualBreakdown(
   } satisfies TwrResidualBreakdown;
 }
 
+export function computeRealizedGainsForRange(
+  transactions: Transaction[],
+  startDate: string,
+  endDate: string,
+  fxPoints: PricePoint[],
+) {
+  const realizedBySymbol: Record<string, number> = {};
+  const costBasisBySymbol = new Map<string, { quantity: number; totalCostUsd: number }>();
+  const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
+
+  for (const tx of sorted) {
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+      continue;
+    }
+
+    const quantity = Math.abs(tx.quantity);
+    const amountUsd = convertSgdToUsd(Math.abs(tx.amount), tx.date, fxPoints);
+    const basis = costBasisBySymbol.get(tx.symbol) ?? { quantity: 0, totalCostUsd: 0 };
+
+    if (tx.type === 'BUY') {
+      basis.quantity += quantity;
+      basis.totalCostUsd += amountUsd;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    const averageCostUsd = basis.quantity > 0 ? basis.totalCostUsd / basis.quantity : 0;
+    const realizedUsd = amountUsd - averageCostUsd * quantity;
+
+    if (tx.date >= startDate && tx.date <= endDate) {
+      realizedBySymbol[tx.symbol] = (realizedBySymbol[tx.symbol] ?? 0) + realizedUsd;
+    }
+
+    const removedCostUsd = averageCostUsd * quantity;
+    basis.quantity = Math.max(0, basis.quantity - quantity);
+    basis.totalCostUsd = Math.max(0, basis.totalCostUsd - removedCostUsd);
+    costBasisBySymbol.set(tx.symbol, basis);
+  }
+
+  return realizedBySymbol;
+}
+
 // Only true bank-account in/out should be treated as external performance flows.
 // Internal FX settlement rows are cash mechanics of trade execution and must be excluded.
 export function isUserControlledExternalFlow(tx: Pick<Transaction, 'type' | 'rawDescription'>): boolean {
@@ -412,9 +561,14 @@ export function isUserControlledExternalFlow(tx: Pick<Transaction, 'type' | 'raw
   return false;
 }
 
-export function isCorruptedStatementArtifact(tx: Pick<Transaction, 'rawDescription'>): boolean {
+export function isCorruptedStatementArtifact(tx: Pick<Transaction, 'type' | 'symbol' | 'rawDescription'>): boolean {
   const description = String(tx.rawDescription ?? '').toLowerCase();
   if (!description) return false;
+
+  // Keep valid position-changing rows even if OCR/page footer text is appended.
+  if ((tx.type === 'BUY' || tx.type === 'SELL' || tx.type === 'SPLIT') && tx.symbol) {
+    return false;
+  }
 
   if (description.includes('this statement and its contents are subject to the terms and conditions')) {
     return true;
@@ -511,11 +665,17 @@ export function normalizeBankTransferPairsForAnalytics(transactions: Transaction
   });
 }
 
-router.get('/', (_req, res) => {
+router.get('/', async (_req, res) => {
   const baselines = getAllBaselines();
   const transactions = normalizeBankTransferPairsForAnalytics(sanitizeTransactionsForAnalytics(getAllTransactions()));
   const anchor = getPortfolioAnchor(baselines, transactions);
-  const reconstructed = reconstructState(anchor.baseline, anchor.transactionsToApply);
+  const trackedSymbols = collectTrackedSymbols(anchor.baseline, anchor.transactionsToApply);
+  const splitStart = anchor.baseline?.date ?? (anchor.transactionsToApply[0]?.date ?? '1970-01-01');
+  const splitEnd = new Date().toISOString().slice(0, 10);
+  const splitResult = await fetchYahooFinanceStockSplits(trackedSymbols, splitStart, splitEnd);
+  const enrichedTransactions = mergeMarketSplitTransactions(anchor.transactionsToApply, splitResult.splits);
+  const effectiveTransactions = sortTransactions(expandManualLinearOptionTransactions(enrichedTransactions));
+  const reconstructed = reconstructState(anchor.baseline, effectiveTransactions);
 
   const warnings = [] as Array<{ type: string; details: unknown }>;
   for (const [symbol, qty] of Object.entries(reconstructed.holdings)) {
@@ -529,7 +689,7 @@ router.get('/', (_req, res) => {
     baselineDate: anchor.baselineDate ?? null,
     baselinesStored: baselines.length,
     transactionsStored: transactions.length,
-    transactionsApplied: anchor.transactionsToApply.length,
+    transactionsApplied: effectiveTransactions.length,
     state: {
       date: new Date().toISOString().slice(0, 10),
       holdings: reconstructed.holdings,
@@ -569,8 +729,13 @@ router.get('/value', async (req: Request, res: Response) => {
   const baselines = getAllBaselines();
   const transactions = normalizeBankTransferPairsForAnalytics(sanitizeTransactionsForAnalytics(getAllTransactions()));
   const anchor = getPortfolioAnchor(baselines, transactions);
-  const txs = sortTransactions(anchor.transactionsToApply);
-  const usdSgdRate = (await fetchYahooFinanceLatestPrices(['USDSGD=X'])).livePrices['USDSGD=X'] ?? null;
+  const trackedSymbols = collectTrackedSymbols(anchor.baseline, anchor.transactionsToApply);
+  const splitStart = anchor.baseline?.date ?? (anchor.transactionsToApply[0]?.date ?? '1970-01-01');
+  const splitEnd = new Date().toISOString().slice(0, 10);
+  const splitResult = await fetchYahooFinanceStockSplits(trackedSymbols, splitStart, splitEnd);
+  const splitEnriched = mergeMarketSplitTransactions(anchor.transactionsToApply, splitResult.splits);
+  const txs = sortTransactions(expandManualLinearOptionTransactions(splitEnriched));
+  const liveUsdSgdRate = (await fetchYahooFinanceLatestPrices(['USDSGD=X'])).livePrices['USDSGD=X'] ?? null;
 
   const startDate = baselines.length ? baselines[0].date : '1970-01-01';
   const rangeEnd = new Date().toISOString().slice(0, 10);
@@ -580,19 +745,33 @@ router.get('/value', async (req: Request, res: Response) => {
 
   const symbols = Object.keys(reconstructState(anchor.baseline, txs).holdings);
   const priceSeries: Record<string, Array<{ date: string; price: number }>> = {};
-  const rawHistory = await fetchYahooFinanceHistoricalPrices(symbols, startDate, rangeEnd);
+  const { series: manualOptionSeries, optionMultipliers } = buildManualLinearOptionSeries(txs, startDate, rangeEnd);
+  const manualOptionSymbols = new Set(Object.keys(manualOptionSeries));
+  const symbolsToFetchFromYahoo = symbols.filter((symbol) => !manualOptionSymbols.has(symbol));
+  const rawHistory = await fetchYahooFinanceHistoricalPrices(symbolsToFetchFromYahoo, startDate, rangeEnd);
   for (const [symbol, points] of Object.entries(rawHistory.history)) {
+    const multiplier = optionMultipliers.get(symbol) ?? 1;
     if (points.length > 0) {
-      priceSeries[symbol] = points;
+      priceSeries[symbol] = points.map((point) => ({
+        date: point.date,
+        price: point.price * multiplier,
+      }));
     }
   }
 
   for (const symbol of symbols) {
     const cached = getCachedPricesForSymbol(symbol);
     if (Object.keys(cached).length > 0 && !(symbol in priceSeries)) {
+      const multiplier = optionMultipliers.get(symbol) ?? 1;
       priceSeries[symbol] = Object.entries(cached)
-        .map(([date, price]) => ({ date, price }))
+        .map(([date, price]) => ({ date, price: price * multiplier }))
         .sort((a, b) => a.date.localeCompare(b.date));
+    }
+  }
+
+  for (const [symbol, points] of Object.entries(manualOptionSeries)) {
+    if (points.length > 0) {
+      priceSeries[symbol] = points;
     }
   }
 
@@ -606,6 +785,8 @@ router.get('/value', async (req: Request, res: Response) => {
   const fullSeries: PortfolioSeriesPoint[] = [];
   const rangeDates = allDates.filter((date) => date >= start && date <= end);
   const fxPoints = await fetchUsdSgdHistory(start, end);
+  const fallbackUsdSgdRate = fxPoints.length > 0 ? fxPoints[fxPoints.length - 1]?.price ?? null : null;
+  const usdSgdRate = liveUsdSgdRate ?? fallbackUsdSgdRate;
   const priceBySymbolDate = buildFilledSymbolPriceMap(symbols, rangeDates, priceSeries);
   const holdingsByDate = new Map<string, TickerHoldingsState>();
 
@@ -742,6 +923,8 @@ router.get('/value', async (req: Request, res: Response) => {
     }
   }
 
+  const realizedGains = computeRealizedGainsForRange(txs, start, end, fxPoints);
+
   const response: Record<string, unknown> = {
     date: new Date().toISOString().slice(0, 10),
     holdingsValue: series[series.length - 1].holdingsValue,
@@ -770,7 +953,7 @@ router.get('/value', async (req: Request, res: Response) => {
     twrSymbolContributions,
     twrUnattributedContribution: residualContribution,
     twrResidualBreakdown,
-    realizedGains: {},
+    realizedGains,
     usdSgdRate,
     missingPriceSymbols: [],
     livePriceFetch: null,

@@ -12,14 +12,18 @@ import {
   buildUsdPortfolioPoint,
   calculateTwrFromSeries,
   calculateInvestedCapitalTwrFromTradeBoundaries,
+  computeRealizedGainsForRange,
   getDateRangeForTimeframe,
   isCorruptedStatementArtifact,
   isInternalSettlementCashRow,
   isUserControlledExternalFlow,
   sanitizeTransactionsForAnalytics,
   normalizeBankTransferPairsForAnalytics,
+  deriveManualOptionCloseTransactions,
 } from '../src/routes/portfolio.js';
-import { applyTransaction, reconstructState } from '../src/reconstruction.js';
+import { applyTransaction, reconstructState, sortTransactions } from '../src/reconstruction.js';
+import { buildManualTransaction, buildOptionContractSymbol } from '../src/manualTrades.js';
+import { buildManualLinearOptionSeries } from '../src/manualOptionValuation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -419,6 +423,28 @@ describe('time-weighted returns', () => {
     expect(sanitized[0]?.id).toBe('ok-1');
   });
 
+  test('keeps valid BUY rows even when footer text is appended by OCR', () => {
+    const noisyBuy = {
+      id: '33799',
+      date: '2025-11-18',
+      type: 'BUY' as const,
+      symbol: 'HOOD',
+      quantity: 22,
+      price: 154.2137,
+      amount: -3392.7,
+      splitRatio: null,
+      rawDescription:
+        'Bght 22 HOOD:US @ 154.2137 SGD 3,3 This statement and its contents are subject to the terms and conditions governing your CMC Invest account',
+      source: 'statement.pdf',
+    };
+
+    expect(isCorruptedStatementArtifact(noisyBuy)).toBe(false);
+
+    const sanitized = sanitizeTransactionsForAnalytics([noisyBuy]);
+    expect(sanitized).toHaveLength(1);
+    expect(sanitized[0]?.id).toBe('33799');
+  });
+
   test('filters internal CHASSGSG settlement rows from analytics input', () => {
     const internalFxSettlement = {
       id: 'fx-1',
@@ -584,6 +610,41 @@ describe('time-weighted returns', () => {
     expect(result.twr).toBeCloseTo(0.1, 5);
     expect(result.flows).toHaveLength(0);
   });
+
+  test('computes realized gains within timeframe for symbols opened and closed inside range', () => {
+    const txs: Transaction[] = [
+      {
+        id: 'buy-1',
+        date: '2026-08-21',
+        type: 'BUY',
+        symbol: 'META270615C00620000',
+        quantity: 1,
+        price: 83.8192,
+        amount: -8381.92,
+        splitRatio: null,
+        source: 'manual-ui:auto-open',
+      },
+      {
+        id: 'sell-1',
+        date: '2026-09-22',
+        type: 'SELL',
+        symbol: 'META270615C00620000',
+        quantity: 1,
+        price: 241.8306,
+        amount: 24183.06,
+        splitRatio: null,
+        source: 'manual-ui:auto-close',
+      },
+    ];
+
+    const fxPoints = [
+      { date: '2026-08-21', price: 1.35 },
+      { date: '2026-09-22', price: 1.35 },
+    ];
+
+    const realized = computeRealizedGainsForRange(txs, '2026-08-01', '2026-10-01', fxPoints);
+    expect(realized.META270615C00620000).toBeCloseTo((24183.06 / 1.35) - (8381.92 / 1.35), 5);
+  });
 });
 
 describe('cash accounting', () => {
@@ -602,6 +663,150 @@ describe('cash accounting', () => {
     });
 
     expect(state.cash).toBe(800);
+  });
+
+  test('builds manual equity and option transactions with the correct cash sign and contract metadata', () => {
+    const equityTrade = buildManualTransaction({
+      date: '2025-02-03',
+      type: 'BUY',
+      instrumentType: 'EQUITY',
+      symbol: 'MSFT',
+      quantity: 10,
+      price: 225.5,
+      source: 'manual-ui',
+    });
+
+    const optionTrade = buildManualTransaction({
+      date: '2025-02-03',
+      type: 'BUY',
+      instrumentType: 'OPTION',
+      optionType: 'CALL',
+      underlyingSymbol: 'MSFT',
+      symbol: 'MSFT250220C00225000',
+      strikePrice: 225,
+      expiryDate: '2025-02-20',
+      quantity: 2,
+      price: 4.2,
+      ownershipShare: 0.5,
+      source: 'manual-ui',
+    });
+
+    expect(equityTrade.amount).toBe(-2255);
+    expect(equityTrade.type).toBe('BUY');
+    expect(equityTrade.symbol).toBe('MSFT');
+
+    expect(optionTrade.amount).toBe(-420);
+    expect(optionTrade.type).toBe('BUY');
+    expect(optionTrade.symbol).toBe('MSFT250220C00225000');
+    expect(optionTrade.quantity).toBe(1);
+    expect(optionTrade.optionType).toBe('CALL');
+    expect(optionTrade.strikePrice).toBe(225);
+    expect(optionTrade.expiryDate).toBe('2025-02-20');
+    expect(optionTrade.contractMultiplier).toBe(100);
+    expect(optionTrade.ownershipShare).toBe(0.5);
+  });
+
+  test('derives the standard Yahoo option ticker from the contract details', () => {
+    expect(buildOptionContractSymbol('MSFT', '2025-02-20', 225, 'CALL')).toBe('MSFT250220C00225000');
+    expect(buildOptionContractSymbol('AAPL', '2026-01-15', 210, 'PUT')).toBe('AAPL260115P00210000');
+  });
+
+  test('builds a linear manual option valuation series using contract notional prices', () => {
+    const tx = buildManualTransaction({
+      date: '2026-01-02',
+      type: 'BUY',
+      instrumentType: 'OPTION',
+      underlyingSymbol: 'TSLA',
+      optionType: 'CALL',
+      strikePrice: 300,
+      expiryDate: '2026-02-20',
+      quantity: 1,
+      price: 2,
+      contractMultiplier: 100,
+      valuationMethod: 'LINEAR',
+      valuationStartDate: '2026-01-02',
+      valuationStartPrice: 2,
+      valuationEndDate: '2026-01-04',
+      valuationEndPrice: 4,
+      source: 'manual-ui',
+    });
+
+    const result = buildManualLinearOptionSeries([tx], '2026-01-01', '2026-01-05');
+    const series = result.series[tx.symbol ?? ''];
+
+    expect(series).toBeDefined();
+    expect(series).toEqual([
+      { date: '2026-01-02', price: 200 },
+      { date: '2026-01-03', price: 300 },
+      { date: '2026-01-04', price: 400 },
+    ]);
+  });
+
+  test('builds a linear manual option valuation series from booked amounts', () => {
+    const tx = buildManualTransaction({
+      date: '2026-01-02',
+      type: 'BUY',
+      instrumentType: 'OPTION',
+      underlyingSymbol: 'TSLA',
+      optionType: 'CALL',
+      strikePrice: 300,
+      expiryDate: '2026-02-20',
+      quantity: 2,
+      price: 1.5,
+      contractMultiplier: 100,
+      valuationMethod: 'LINEAR',
+      valuationStartDate: '2026-01-02',
+      valuationStartAmount: 300,
+      valuationEndDate: '2026-01-04',
+      valuationEndAmount: 500,
+      source: 'manual-ui',
+    });
+
+    const result = buildManualLinearOptionSeries([tx], '2026-01-01', '2026-01-05');
+    const series = result.series[tx.symbol ?? ''];
+
+    expect(series).toBeDefined();
+    expect(series).toEqual([
+      { date: '2026-01-02', price: 150 },
+      { date: '2026-01-03', price: 200 },
+      { date: '2026-01-04', price: 250 },
+    ]);
+  });
+
+  test('derives auto-close transactions for manual linear option positions at valuation end date', () => {
+    const tx = buildManualTransaction({
+      date: '2026-01-02',
+      type: 'BUY',
+      instrumentType: 'OPTION',
+      underlyingSymbol: 'META',
+      optionType: 'CALL',
+      strikePrice: 500,
+      expiryDate: '2026-03-20',
+      quantity: 1,
+      price: 2,
+      contractMultiplier: 100,
+      ownershipShare: 1,
+      valuationMethod: 'LINEAR',
+      valuationStartDate: '2026-01-02',
+      valuationStartAmount: 200,
+      valuationEndDate: '2026-01-04',
+      valuationEndAmount: 350,
+      source: 'manual-ui',
+    });
+
+    const derived = deriveManualOptionCloseTransactions([tx], '2026-01-10');
+    expect(derived).toHaveLength(1);
+    expect(derived[0]).toMatchObject({
+      type: 'SELL',
+      symbol: tx.symbol,
+      date: '2026-01-04',
+      quantity: 1,
+      price: 3.5,
+      amount: 350,
+    });
+
+    const reconstructed = reconstructState(null, sortTransactions([tx, ...derived]));
+    expect(reconstructed.holdings[tx.symbol ?? '']).toBeCloseTo(0, 10);
   });
 });
 
