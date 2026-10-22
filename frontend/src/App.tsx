@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   createManualTrade,
   fetchPortfolio,
   fetchPortfolioHistory,
   fetchPortfolioValue,
+  fetchSession,
+  signInWithGoogle,
+  signOut,
   type PricingMethod,
   uploadBaseline,
   uploadTransactions,
@@ -720,10 +723,14 @@ function App() {
   const [manualTradeModalOpen, setManualTradeModalOpen] = useState(false)
   const [manualTradeUpload, setManualTradeUpload] = useState<UploadState<ManualTradeResponse>>(EMPTY_UPLOAD_STATE)
   const [manualTradeForm, setManualTradeForm] = useState<ManualTradeFormState>(DEFAULT_MANUAL_TRADE_FORM)
+  const [authUser, setAuthUser] = useState<{ email: string } | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authError, setAuthError] = useState<string | null>(null)
   const [holdingsSort, setHoldingsSort] = useState<{ key: HoldingsSortKey; direction: SortDirection }>({
     key: 'value',
     direction: 'desc',
   })
+  const googleButtonRef = useRef<HTMLDivElement | null>(null)
 
   function toggleHoldingsSort(key: HoldingsSortKey) {
     setHoldingsSort((current) => {
@@ -747,6 +754,11 @@ function App() {
   }
 
   async function refreshDashboard() {
+    if (!authUser) {
+      setPortfolioError('Sign in with your authorized Google account to view the portfolio.')
+      return
+    }
+
     setPortfolioLoading(true)
     setPortfolioError(null)
 
@@ -772,6 +784,47 @@ function App() {
   }
 
   useEffect(() => {
+    let cancelled = false
+
+    async function loadSession() {
+      try {
+        const session = await fetchSession()
+        if (cancelled) {
+          return
+        }
+
+        setAuthUser(session.authenticated ? session.user : null)
+        setAuthError(null)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+
+        setAuthUser(null)
+        setAuthError(getErrorMessage(error))
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(false)
+        }
+      }
+    }
+
+    void loadSession()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!authUser) {
+      setPortfolioLoading(false)
+      setPortfolio(null)
+      setPortfolioValue(null)
+      setHistory(null)
+      return
+    }
+
     let cancelled = false
 
     async function loadInitialDashboard() {
@@ -814,7 +867,76 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [timeframe, pricingMethod, debugTwrPanel, twrMode])
+  }, [authUser, timeframe, pricingMethod, debugTwrPanel, twrMode])
+
+  useEffect(() => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+    if (!clientId || !googleButtonRef.current || authUser || authLoading) {
+      return
+    }
+
+    const initializeGoogle = () => {
+      const google = (window as any).google
+      if (!google?.accounts?.id || !googleButtonRef.current) {
+        return
+      }
+
+      google.accounts.id.initialize({
+        client_id: clientId,
+        callback: async (response: { credential?: string }) => {
+          if (!response.credential) {
+            setAuthError('Google sign-in failed. Please try again.')
+            return
+          }
+
+          setAuthLoading(true)
+          try {
+            const result = await signInWithGoogle(response.credential)
+            setAuthUser(result.user)
+            setAuthError(null)
+          } catch (error) {
+            setAuthError(getErrorMessage(error))
+          } finally {
+            setAuthLoading(false)
+          }
+        },
+      })
+
+      google.accounts.id.renderButton(googleButtonRef.current, {
+        theme: 'filled_black',
+        size: 'large',
+        text: 'signin_with',
+        shape: 'pill',
+      })
+    }
+
+    const existingScript = document.querySelector('script[src="https://accounts.google.com/gsi/client"]')
+    if (existingScript) {
+      initializeGoogle()
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.onload = initializeGoogle
+    document.head.appendChild(script)
+  }, [authUser])
+
+  async function handleSignOut() {
+    try {
+      await signOut()
+    } catch (error) {
+      console.warn('Logout request failed:', getErrorMessage(error))
+    } finally {
+      setAuthUser(null)
+      setAuthError(null)
+      setPortfolio(null)
+      setPortfolioValue(null)
+      setHistory(null)
+    }
+  }
 
   async function handleBaselineSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1031,6 +1153,47 @@ function App() {
       ? portfolioCagr - benchmarkCagr
       : undefined
   const benchmarkPeriodReturn = portfolioValue?.benchmarkReturn
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,rgba(30,58,87,0.9),rgba(8,12,18,1)_60%)] px-4 py-10 text-slate-100">
+        <div className="rounded-2xl border border-white/10 bg-slate-900/80 px-6 py-5 text-sm text-slate-200 shadow-xl backdrop-blur-sm">
+          Checking your session…
+        </div>
+      </div>
+    )
+  }
+
+  if (!authUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,rgba(30,58,87,0.9),rgba(8,12,18,1)_60%)] px-4 py-10 text-slate-100">
+        <div className="w-full max-w-md rounded-3xl border border-white/10 bg-slate-900/80 p-8 shadow-2xl backdrop-blur-sm">
+          <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Kee Jin's Portfolio Tracker</p>
+          <h1 className="mt-3 text-3xl font-semibold text-white">Sign in to continue</h1>
+          <p className="mt-3 text-sm text-slate-300">
+            Access is restricted to your authorized Google account.
+          </p>
+
+          {!googleClientId ? (
+            <div className="mt-6 rounded-2xl border border-rose-300/30 bg-rose-500/10 p-4 text-sm text-rose-100">
+              Missing VITE_GOOGLE_CLIENT_ID in Vercel. Add the Google OAuth client ID to the production frontend environment variables.
+            </div>
+          ) : (
+            <div className="mt-6 flex justify-center">
+              <div ref={googleButtonRef} className="min-w-[220px]" />
+            </div>
+          )}
+
+          {authError && (
+            <div className="mt-4 rounded-2xl border border-rose-300/30 bg-rose-500/10 p-3 text-sm text-rose-100">
+              {authError}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(30,58,87,0.9),rgba(8,12,18,1)_60%)] text-slate-100">
@@ -1038,11 +1201,36 @@ function App() {
         <header className="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-xl backdrop-blur-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">CMC Portfolio Tracker</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Kee Jin's Portfolio Tracker</p>
               <h1 className="mt-1 text-2xl font-semibold text-white">Portfolio Dashboard</h1>
             </div>
 
             <div className="flex items-center gap-2">
+              {authLoading ? (
+                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
+                  Checking session…
+                </span>
+              ) : authUser ? (
+                <div className="flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                  <span>{authUser.email}</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleSignOut()}
+                    className="rounded-full border border-white/15 px-2 py-1 text-xs text-white transition hover:bg-white/10"
+                  >
+                    Sign out
+                  </button>
+                </div>
+              ) : (
+                <div ref={googleButtonRef} className="min-w-[180px]" />
+              )}
+
+              {authError && (
+                <span className="rounded-full border border-rose-300/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+                  {authError}
+                </span>
+              )}
+
               <button
                 type="button"
                 onClick={() => {
