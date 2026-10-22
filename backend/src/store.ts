@@ -6,12 +6,20 @@ import type { Baseline, Transaction, Upload } from './parsers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '../data');
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+type StoreDocumentKey = 'baselines' | 'transactions' | 'uploads';
 
 const state = {
   baselines: [] as Baseline[],
   transactions: [] as Transaction[],
   uploads: [] as Upload[],
 };
+
+function isSupabaseConfigured() {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
 
 function readJsonFile<T>(filePath: string, fallback: T): T {
   try {
@@ -33,11 +41,86 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+async function readSupabaseDocument<T>(key: StoreDocumentKey): Promise<T | null> {
+  if (!isSupabaseConfigured() || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/cache_documents?key=eq.${encodeURIComponent(key)}&select=key,value`, {
+    method: 'GET',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      Prefer: 'return=minimal',
+    },
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const rows = (await response.json()) as Array<{ key: string; value: T }>;
+  return rows[0]?.value ?? null;
+}
+
+async function writeSupabaseDocument<T>(key: StoreDocumentKey, value: T): Promise<void> {
+  if (!isSupabaseConfigured() || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return;
+  }
+
+  await fetch(`${SUPABASE_URL}/rest/v1/cache_documents`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      Prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify({ key, value }),
+  });
+}
+
+function writeLocalStoreState() {
+  writeJsonFile(path.join(DATA_DIR, 'baselines.json'), state.baselines);
+  writeJsonFile(path.join(DATA_DIR, 'transactions.json'), state.transactions);
+  writeJsonFile(path.join(DATA_DIR, 'uploads.json'), state.uploads);
+}
+
+export async function hydrateStoreFromSupabase() {
+  if (!isSupabaseConfigured()) {
+    return;
+  }
+
+  const [remoteBaselines, remoteTransactions, remoteUploads] = await Promise.all([
+    readSupabaseDocument<Baseline[]>('baselines'),
+    readSupabaseDocument<Transaction[]>('transactions'),
+    readSupabaseDocument<Upload[]>('uploads'),
+  ]);
+
+  if (remoteBaselines) {
+    state.baselines = remoteBaselines;
+  }
+
+  if (remoteTransactions) {
+    state.transactions = remoteTransactions;
+  }
+
+  if (remoteUploads) {
+    state.uploads = remoteUploads;
+  }
+
+  writeLocalStoreState();
+}
+
 export function initStore() {
   ensureDataDir();
   state.baselines = readJsonFile(path.join(DATA_DIR, 'baselines.json'), [] as Baseline[]);
   state.transactions = readJsonFile(path.join(DATA_DIR, 'transactions.json'), [] as Transaction[]);
   state.uploads = readJsonFile(path.join(DATA_DIR, 'uploads.json'), [] as Upload[]);
+
+  if (isSupabaseConfigured()) {
+    void hydrateStoreFromSupabase();
+  }
 }
 
 export function getAllBaselines(): Baseline[] {
@@ -58,6 +141,10 @@ export function addBaseline(baseline: Baseline) {
     state.baselines.push(baseline);
     state.baselines.sort((a, b) => a.date.localeCompare(b.date));
     writeJsonFile(path.join(DATA_DIR, 'baselines.json'), state.baselines);
+
+    if (isSupabaseConfigured()) {
+      void writeSupabaseDocument('baselines', state.baselines);
+    }
   }
   return baseline;
 }
@@ -74,6 +161,10 @@ export function addTransactions(items: Transaction[]) {
   state.transactions.sort((a, b) => a.date.localeCompare(b.date));
   writeJsonFile(path.join(DATA_DIR, 'transactions.json'), state.transactions);
 
+  if (isSupabaseConfigured()) {
+    void writeSupabaseDocument('transactions', state.transactions);
+  }
+
   return {
     added: newItems.length,
     duplicates: items.length - newItems.length,
@@ -83,5 +174,10 @@ export function addTransactions(items: Transaction[]) {
 export function addUpload(upload: Upload) {
   state.uploads.unshift(upload);
   writeJsonFile(path.join(DATA_DIR, 'uploads.json'), state.uploads);
+
+  if (isSupabaseConfigured()) {
+    void writeSupabaseDocument('uploads', state.uploads);
+  }
+
   return upload;
 }
