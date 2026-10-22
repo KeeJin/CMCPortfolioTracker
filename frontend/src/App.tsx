@@ -788,7 +788,9 @@ function App() {
 
     async function loadSession() {
       try {
+        console.log('[auth] fetching session from backend')
         const session = await fetchSession()
+        console.log('[auth] session response:', session)
         if (cancelled) {
           return
         }
@@ -796,6 +798,7 @@ function App() {
         setAuthUser(session.authenticated ? session.user : null)
         setAuthError(null)
       } catch (error) {
+        console.error('[auth] session fetch failed:', error)
         if (cancelled) {
           return
         }
@@ -871,19 +874,42 @@ function App() {
 
   useEffect(() => {
     const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+    console.log('[auth] google client env present:', Boolean(clientId), 'clientId:', clientId ?? 'missing')
+    console.log('[auth] render button preconditions:', {
+      hasClientId: Boolean(clientId),
+      hasButtonRef: Boolean(googleButtonRef.current),
+      authUserExists: Boolean(authUser),
+      authLoading,
+    })
+
     if (!clientId || !googleButtonRef.current || authUser || authLoading) {
+      if (!clientId) {
+        console.warn('[auth] missing VITE_GOOGLE_CLIENT_ID')
+      }
+      if (!googleButtonRef.current) {
+        console.warn('[auth] google button ref not ready yet')
+      }
+      if (authUser) {
+        console.log('[auth] user already authenticated; skipping button render')
+      }
+      if (authLoading) {
+        console.log('[auth] auth still loading; skipping button render')
+      }
       return
     }
 
     const initializeGoogle = () => {
       const google = (window as any).google
+      console.log('[auth] google SDK available?:', Boolean(google?.accounts?.id))
       if (!google?.accounts?.id || !googleButtonRef.current) {
+        console.warn('[auth] google sdk not ready or button ref missing')
         return
       }
 
       google.accounts.id.initialize({
         client_id: clientId,
         callback: async (response: { credential?: string }) => {
+          console.log('[auth] Google callback received:', Boolean(response?.credential))
           if (!response.credential) {
             setAuthError('Google sign-in failed. Please try again.')
             return
@@ -892,9 +918,11 @@ function App() {
           setAuthLoading(true)
           try {
             const result = await signInWithGoogle(response.credential)
+            console.log('[auth] backend sign-in success:', result)
             setAuthUser(result.user)
             setAuthError(null)
           } catch (error) {
+            console.error('[auth] backend sign-in failed:', error)
             setAuthError(getErrorMessage(error))
           } finally {
             setAuthLoading(false)
@@ -908,9 +936,11 @@ function App() {
         text: 'signin_with',
         shape: 'pill',
       })
+      console.log('[auth] Google button rendered')
     }
 
     const existingScript = document.querySelector('script[src="https://accounts.google.com/gsi/client"]')
+    console.log('[auth] existing Google script tag present:', Boolean(existingScript))
     if (existingScript) {
       initializeGoogle()
       return
@@ -920,9 +950,15 @@ function App() {
     script.src = 'https://accounts.google.com/gsi/client'
     script.async = true
     script.defer = true
-    script.onload = initializeGoogle
+    script.onload = () => {
+      console.log('[auth] Google script loaded successfully')
+      initializeGoogle()
+    }
+    script.onerror = () => {
+      console.error('[auth] Google script failed to load')
+    }
     document.head.appendChild(script)
-  }, [authUser])
+  }, [authUser, authLoading])
 
   async function handleSignOut() {
     try {
