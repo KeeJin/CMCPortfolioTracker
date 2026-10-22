@@ -1024,6 +1024,14 @@ function App() {
       ? (endHoldingsValue - startHoldingsValue) / startHoldingsValue
       : undefined
 
+  const portfolioCagr = portfolioValue?.cagr
+  const benchmarkCagr = portfolioValue?.benchmarkCagr
+  const cagrAlpha =
+    typeof portfolioCagr === 'number' && typeof benchmarkCagr === 'number'
+      ? portfolioCagr - benchmarkCagr
+      : undefined
+  const benchmarkPeriodReturn = portfolioValue?.benchmarkReturn
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(30,58,87,0.9),rgba(8,12,18,1)_60%)] text-slate-100">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
@@ -1376,6 +1384,52 @@ function App() {
                         ? 'Mode: Active positions only (cash ignored)'
                         : 'Mode: Account total (holdings + cash)'}
                     </p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-cyan-300/25 bg-gradient-to-r from-slate-900/80 via-slate-900/70 to-cyan-950/45 p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-cyan-300">Annualized Return</p>
+                      <h3 className="mt-1 text-xl font-semibold text-white">CAGR vs S&P 500</h3>
+                      <p className="mt-1 text-sm text-slate-300">
+                        Compounded annual growth over the selected {timeframe.toUpperCase()} timeframe.
+                      </p>
+                    </div>
+                    <div className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs text-slate-300">
+                      Benchmark source: Yahoo Finance S&P 500 ({portfolioValue?.benchmarkSymbol ?? 'VOO fallback'})
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                    <div className="rounded-xl border border-cyan-200/30 bg-cyan-300/10 p-4">
+                      <MetricLabel
+                        label="Portfolio CAGR"
+                        tooltip="Annualized Time-Weighted Return for the selected timeframe."
+                      />
+                      <p className="mt-2 text-3xl font-semibold text-cyan-100">{formatPercent(portfolioCagr)}</p>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-200/35 bg-amber-300/10 p-4">
+                      <MetricLabel
+                        label="S&P 500 CAGR"
+                        tooltip="Annualized benchmark return over the same timeframe."
+                      />
+                      <p className="mt-2 text-3xl font-semibold text-amber-100">{formatPercent(benchmarkCagr)}</p>
+                    </div>
+
+                    <div className="rounded-xl border border-white/15 bg-white/5 p-4">
+                      <MetricLabel
+                        label="CAGR Alpha"
+                        tooltip="Portfolio CAGR minus S&P 500 CAGR. Positive means outperformance."
+                      />
+                      <p className={`mt-2 text-3xl font-semibold ${typeof cagrAlpha === 'number' ? (cagrAlpha >= 0 ? 'text-emerald-300' : 'text-rose-300') : 'text-slate-200'}`}>
+                        {formatSignedPercent(cagrAlpha)}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-300">
+                        Benchmark total return ({timeframe.toUpperCase()}): {formatSignedPercent(benchmarkPeriodReturn)}
+                      </p>
+                    </div>
                   </div>
                 </div>
 

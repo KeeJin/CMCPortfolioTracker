@@ -136,6 +136,8 @@ export type PortfolioValueResponse = {
   benchmarkCagr?: number
   /** VOO annualized volatility for the timeframe. */
   benchmarkVolatility?: number
+  /** Benchmark symbol used for comparison (prefers ^GSPC, falls back to VOO). */
+  benchmarkSymbol?: string | null
   /** Latest market value per held symbol (symbol → USD value). */
   positionValues?: Record<string, number>
   /** Per-symbol price-return contribution over the timeframe (symbol → USD gain/loss). */

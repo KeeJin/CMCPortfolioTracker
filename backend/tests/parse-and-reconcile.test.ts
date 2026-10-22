@@ -773,6 +773,32 @@ describe('cash accounting', () => {
     ]);
   });
 
+  test('applies ownership share correctly for amount-based linear valuation inputs', () => {
+    const tx = buildManualTransaction({
+      date: '2026-10-22',
+      type: 'BUY',
+      instrumentType: 'OPTION',
+      underlyingSymbol: 'NFLX',
+      optionType: 'CALL',
+      strikePrice: 89,
+      expiryDate: '2026-08-15',
+      quantity: 1,
+      price: 0,
+      contractMultiplier: 100,
+      ownershipShare: 0.333,
+      valuationMethod: 'LINEAR',
+      valuationStartDate: '2026-01-15',
+      valuationStartAmount: 7938.85,
+      valuationEndDate: '2026-04-13',
+      valuationEndAmount: 11469.31,
+      source: 'manual-ui',
+    });
+
+    expect(tx.quantity).toBeCloseTo(0.333, 10);
+    expect(tx.valuationStartPrice).toBeCloseTo(79.3885, 6);
+    expect(tx.valuationEndPrice).toBeCloseTo(114.6931, 6);
+  });
+
   test('derives auto-close transactions for manual linear option positions at valuation end date', () => {
     const tx = buildManualTransaction({
       date: '2026-01-02',

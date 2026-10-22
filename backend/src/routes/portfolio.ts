@@ -25,6 +25,10 @@ export function getDateRangeForTimeframe(timeframe: string, referenceDate: Date 
   const end = new Date(referenceDate);
   const endIso = end.toISOString().slice(0, 10);
 
+  if (timeframe === 'all') {
+    return { start: '1900-01-01', end: endIso };
+  }
+
   if (timeframe === 'ytd') {
     const start = new Date(Date.UTC(end.getUTCFullYear(), 0, 1));
     return { start: start.toISOString().slice(0, 10), end: endIso };
@@ -53,9 +57,73 @@ function getSamplingStepForTimeframe(timeframe: string): number {
       return 7;
     case '5y':
       return 14;
+    case 'all':
+      return 7;
     default:
       return 5;
   }
+}
+
+function calculateAnnualizedVolatilityFromPriceSeries(points: Array<{ date: string; price: number }>): number {
+  if (points.length < 2) return 0;
+
+  const sorted = [...points].sort((a, b) => a.date.localeCompare(b.date));
+  const dailyReturns: number[] = [];
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const previous = sorted[i - 1]?.price ?? 0;
+    const current = sorted[i]?.price ?? 0;
+    if (!Number.isFinite(previous) || !Number.isFinite(current) || previous <= 0) {
+      continue;
+    }
+    dailyReturns.push((current - previous) / previous);
+  }
+
+  if (dailyReturns.length < 2) return 0;
+
+  const mean = dailyReturns.reduce((sum, value) => sum + value, 0) / dailyReturns.length;
+  const variance = dailyReturns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (dailyReturns.length - 1);
+  if (!Number.isFinite(variance) || variance < 0) return 0;
+
+  return Math.sqrt(variance) * Math.sqrt(252);
+}
+
+function buildNormalizedBenchmarkSeries(sampledDates: string[], pricePoints: Array<{ date: string; price: number }>): number[] {
+  if (sampledDates.length === 0 || pricePoints.length === 0) {
+    return sampledDates.map(() => 1);
+  }
+
+  const sortedPoints = [...pricePoints]
+    .filter((point) => point.date && Number.isFinite(point.price) && point.price > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (sortedPoints.length === 0) {
+    return sampledDates.map(() => 1);
+  }
+
+  const seriesRaw: number[] = [];
+  let pointer = 0;
+  let lastKnownPrice: number | null = null;
+
+  for (const date of sampledDates) {
+    while (pointer < sortedPoints.length && sortedPoints[pointer].date <= date) {
+      lastKnownPrice = sortedPoints[pointer].price;
+      pointer += 1;
+    }
+
+    if (lastKnownPrice === null) {
+      lastKnownPrice = sortedPoints[0].price;
+    }
+
+    seriesRaw.push(lastKnownPrice);
+  }
+
+  const base = seriesRaw[0];
+  if (!Number.isFinite(base) || base <= 0) {
+    return sampledDates.map(() => 1);
+  }
+
+  return seriesRaw.map((price) => price / base);
 }
 
 function toNumber(value: unknown, fallback = 0) {
@@ -827,6 +895,7 @@ router.get('/value', async (req: Request, res: Response) => {
       benchmarkReturn: 0,
       benchmarkCagr: 0,
       benchmarkVolatility: 0,
+      benchmarkSymbol: null,
       positionValues: {},
       positionContributions: {},
       realizedGains: {},
@@ -837,12 +906,13 @@ router.get('/value', async (req: Request, res: Response) => {
     return;
   }
 
+  const effectiveStartDate = series[0].date;
   const startValue = series[0].totalValue;
   const endValue = series[series.length - 1].totalValue;
   const totalReturn = startValue === 0 ? 0 : endValue / startValue - 1;
 
   const externalFlows = txs
-    .filter((tx) => tx.date >= start && tx.date <= end)
+    .filter((tx) => tx.date >= effectiveStartDate && tx.date <= end)
     .filter((tx) => isUserControlledExternalFlow(tx))
     .map((tx) => {
       const signedSgd = tx.type === 'DEPOSIT' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
@@ -856,10 +926,10 @@ router.get('/value', async (req: Request, res: Response) => {
   const accountTwrWithoutExternalFlows = calculateTwrFromSeries(fullSeries, []);
 
   const investedCapitalTradeTransactions = txs
-    .filter((tx) => tx.date >= start && tx.date <= end)
+    .filter((tx) => tx.date >= effectiveStartDate && tx.date <= end)
     .filter((tx) => tx.type === 'BUY' || tx.type === 'SELL');
 
-  const preRangeState = reconstructState(anchor.baseline, txs.filter((tx) => tx.date < start));
+  const preRangeState = reconstructState(anchor.baseline, txs.filter((tx) => tx.date < effectiveStartDate));
   const investedCapitalResult = calculateInvestedCapitalTwrFromTradeBoundaries(
     rangeDates,
     preRangeState,
@@ -893,13 +963,45 @@ router.get('/value', async (req: Request, res: Response) => {
     holdingsByDate,
     priceBySymbolDate,
     attributionFlows,
-    txs.filter((tx) => tx.date >= start && tx.date <= end),
+    txs.filter((tx) => tx.date >= effectiveStartDate && tx.date <= end),
     fxPoints,
   );
   const twrSymbolContributionTotal = Object.values(twrSymbolContributions).reduce((sum, value) => sum + value, 0);
   const twrResidualBreakdown = computeTwrResidualBreakdown(attributionSeries, attributionFlows, twrSymbolContributionTotal);
-  const years = Math.max((new Date(end).getTime() - new Date(start).getTime()) / (365.25 * 86400 * 1000), 1 / 12);
+  const years = Math.max((new Date(end).getTime() - new Date(effectiveStartDate).getTime()) / (365.25 * 86400 * 1000), 1 / 12);
   const cagr = (1 + twr) ** (1 / years) - 1;
+
+  let benchmarkTwrSeries = series.map(() => 1);
+  let benchmarkReturn = 0;
+  let benchmarkCagr = 0;
+  let benchmarkVolatility = 0;
+  let benchmarkSymbol: string | null = null;
+
+  const sampledDatesForBenchmark = series.map((entry) => entry.date);
+  const benchmarkCandidates = ['^GSPC', 'VOO'];
+  for (const benchmarkCandidate of benchmarkCandidates) {
+    const benchmarkHistory = await fetchYahooFinanceHistoricalPrices([benchmarkCandidate], startDate, rangeEnd);
+    const benchmarkPoints = benchmarkHistory.history[benchmarkCandidate] ?? [];
+    if (benchmarkPoints.length === 0) {
+      continue;
+    }
+
+    const normalized = buildNormalizedBenchmarkSeries(sampledDatesForBenchmark, benchmarkPoints);
+    if (normalized.length === 0) {
+      continue;
+    }
+
+    benchmarkTwrSeries = normalized;
+    benchmarkSymbol = benchmarkCandidate;
+    const first = normalized[0] ?? 1;
+    const last = normalized[normalized.length - 1] ?? first;
+    benchmarkReturn = first === 0 ? 0 : last / first - 1;
+    benchmarkCagr = (1 + benchmarkReturn) ** (1 / years) - 1;
+    benchmarkVolatility = calculateAnnualizedVolatilityFromPriceSeries(
+      benchmarkPoints.filter((point) => point.date >= effectiveStartDate && point.date <= end),
+    );
+    break;
+  }
 
   const latestState = reconstructState(anchor.baseline, txs);
   const positionValues: Record<string, number> = {};
@@ -923,13 +1025,13 @@ router.get('/value', async (req: Request, res: Response) => {
     }
   }
 
-  const realizedGains = computeRealizedGainsForRange(txs, start, end, fxPoints);
+  const realizedGains = computeRealizedGainsForRange(txs, effectiveStartDate, end, fxPoints);
 
   const response: Record<string, unknown> = {
     date: new Date().toISOString().slice(0, 10),
     holdingsValue: series[series.length - 1].holdingsValue,
     totalValue: series[series.length - 1].totalValue,
-    startDate: start,
+    startDate: effectiveStartDate,
     endDate: end,
     totalReturn,
     // Flow-adjusted gain/loss helps explain performance independent of user cash movements.
@@ -944,10 +1046,11 @@ router.get('/value', async (req: Request, res: Response) => {
     timeframe,
     series,
     twrSeries: series.map((entry) => entry.totalValue / series[0].totalValue),
-    benchmarkTwrSeries: series.map((entry) => 1),
-    benchmarkReturn: 0,
-    benchmarkCagr: 0,
-    benchmarkVolatility: 0,
+    benchmarkTwrSeries,
+    benchmarkReturn,
+    benchmarkCagr,
+    benchmarkVolatility,
+    benchmarkSymbol,
     positionValues,
     positionContributions,
     twrSymbolContributions,
