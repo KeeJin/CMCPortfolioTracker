@@ -11,9 +11,15 @@ import type {
 
 export type PricingMethod = 'transaction_forward_fill' | 'google_finance' | 'stooq_free_live' | 'yahoo_finance'
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+
 async function apiRequest<T>(input: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, {
+  const isAbsoluteUrl = /^https?:\/\//i.test(input)
+  const url = isAbsoluteUrl ? input : `${API_BASE_URL}${input.startsWith('/') ? input : `/${input}`}`
+
+  const response = await fetch(url, {
     ...init,
+    credentials: 'include',
     headers: init?.headers,
   })
 
@@ -87,4 +93,24 @@ export function fetchPortfolioValue(
 
 export function fetchPortfolioHistory() {
   return apiRequest<PortfolioHistoryResponse>('/api/portfolio/history')
+}
+
+export function fetchSession() {
+  return apiRequest<{ authenticated: boolean; user: { email: string } | null }>('/api/auth/session')
+}
+
+export function signInWithGoogle(credential: string) {
+  return apiRequest<{ success: boolean; user: { email: string } }>('/api/auth/google', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ credential }),
+  })
+}
+
+export function signOut() {
+  return apiRequest<{ success: boolean }>('/api/auth/logout', {
+    method: 'POST',
+  })
 }
