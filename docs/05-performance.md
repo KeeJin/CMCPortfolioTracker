@@ -1,0 +1,382 @@
+# 05-performance.md
+
+## Purpose
+
+This document defines how portfolio performance is calculated.
+
+The system must support:
+
+* Portfolio value over time
+* Time-weighted return (TWR) as optional performance context
+* Basic benchmarking (optional)
+
+IRR is intentionally excluded from the current product scope.
+
+---
+
+## Core Principle
+
+Performance is derived from:
+
+```text
+Portfolio State + Market Prices + Cash Flows
+```
+
+---
+
+## 1. Portfolio Value
+
+At any time `t`:
+
+```ts
+portfolio_value(t) =
+  sum_over_assets(shares_i(t) * price_i(t)) + cash(t)
+```
+
+Where:
+
+* `shares_i(t)` = shares held at time `t`
+* `price_i(t)` = market price at time `t`
+* `cash(t)` = cash balance at time `t`
+
+`shares_i(t)` must already reflect any stock split events that occurred on or before `t`.
+
+---
+
+## 2. Market Data Requirement
+
+The system MUST obtain historical prices for each symbol.
+
+Requirements:
+
+* Daily closing prices are sufficient
+* Prices must align with transaction dates
+* Missing prices should be handled gracefully
+* Corporate actions that change quantity must be applied separately from price history
+
+---
+
+## Handling Missing Prices
+
+If price for a date is missing:
+
+* Use last available price (forward fill)
+
+```ts
+price(t) = last_known_price_before(t)
+```
+
+---
+
+## 3. Portfolio Time Series
+
+To compute performance, generate a time series:
+
+```ts
+type PortfolioValuePoint = {
+  date: string
+  totalValue: number
+  holdingsValue: number
+  cash: number
+}
+```
+
+---
+
+### Time Series Construction
+
+For each date in range:
+
+1. Apply transactions up to that date
+2. Compute holdings
+3. Fetch prices
+4. Compute value
+
+This transaction stream includes split events, so holdings quantities and position values remain correct after a stock split.
+
+---
+
+## 4. Cash Flow Classification
+
+Cash flows must be separated into:
+
+### External Cash Flows (user-controlled)
+
+* DEPOSIT
+* WITHDRAWAL
+
+### Internal Portfolio Flows
+
+* BUY
+* SELL
+* DIVIDEND
+* SPLIT
+
+---
+
+### Rules
+
+| Type       | Affects Value | Affects Performance |
+| ---------- | ------------- | ------------------- |
+| BUY        | Yes           | No                  |
+| SELL       | Yes           | No                  |
+| DIVIDEND   | Yes           | Yes                 |
+| DEPOSIT    | Yes           | No                  |
+| WITHDRAWAL | Yes           | No                  |
+| SPLIT      | Yes           | No                  |
+
+---
+
+## 5. Time-Weighted Return (TWR)
+
+### Purpose
+
+Measures portfolio performance **independent of deposits/withdrawals**.
+
+---
+
+### Method
+
+Break timeline into sub-periods at each external cash flow:
+
+```text
+Period 1: t0 → deposit
+Period 2: deposit → next deposit/withdrawal
+...
+```
+
+---
+
+### Formula
+
+For each period:
+
+```ts
+period_return =
+  (ending_value - starting_value - external_cash_flow) / starting_value
+```
+
+Total TWR:
+
+```ts
+TWR = (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
+```
+
+---
+
+### Important Rules
+
+* Ignore DEPOSIT/WITHDRAWAL as performance
+* Include DIVIDENDS as performance
+* Use portfolio value before and after each cash flow
+* Do NOT treat SPLIT as an external cash flow
+
+### Timeframe-Specific TWR
+
+When the API returns a timeframe-specific chart:
+
+* first build performance on the full underlying history
+* then sample the value series for the requested timeframe
+* then filter deposit/withdrawal cash flows to that sampled date range
+* finally compute TWR for that timeframe only
+
+This avoids a known issue where metrics become identical to naive total return because deposit/withdrawal dates were lost during sampling.
+
+---
+
+## 6. Dividend Handling
+
+Dividends:
+
+* increase cash
+* contribute to return
+
+They are treated as:
+
+```ts
+internal_gain
+```
+
+NOT external cash flow.
+
+---
+
+## 8. Benchmarking (Optional)
+
+### Purpose
+
+Compare portfolio performance against an index (e.g. S&P 500).
+
+---
+
+### Method
+
+1. Select benchmark symbol (e.g. SPY)
+2. Fetch price series
+3. Normalize:
+
+```ts
+benchmark_index(t) = price(t) / price(t0)
+```
+
+---
+
+### Portfolio Normalization
+
+```ts
+portfolio_index(t) = value(t) / value(t0)
+```
+
+---
+
+### Comparison
+
+Plot both:
+
+* portfolio_index
+* benchmark_index
+
+---
+
+## 9. Edge Cases
+
+### Zero Starting Value
+
+If starting value = 0:
+
+* cannot compute return
+* return = undefined
+
+---
+
+### Large Cash Flows
+
+Frequent deposits/withdrawals:
+
+* TWR remains valid
+* external cash flow timing is still tracked in the value series, but IRR is deliberately out of scope for this product
+
+---
+
+### Missing Market Data
+
+* forward-fill prices
+* if no historical data exists → exclude symbol
+
+---
+
+### Negative Holdings (invalid)
+
+* should never happen
+* indicates data error
+
+---
+
+## 10. Performance Output
+
+Example:
+
+```ts
+{
+  startDate: string,
+  endDate: string,
+
+  totalReturn: number,      // simple return
+  twr: number,              // time-weighted return
+
+  series: PortfolioValuePoint[]
+}
+```
+
+---
+
+## 11. Implementation Notes
+
+* Use daily granularity (not intraday)
+* Avoid floating-point accumulation errors where possible
+* Keep calculations deterministic
+
+---
+
+## 12. Additional Metrics (Implemented)
+
+### CAGR (Compound Annual Growth Rate)
+
+Annualizes the timeframe TWR:
+
+```ts
+CAGR = (1 + TWR)^(1 / years) - 1
+```
+
+where `years = daysBetween(startDate, endDate) / 365.25`.
+
+Returned per timeframe alongside TWR.
+
+---
+
+### Volatility
+
+Annualized standard deviation of daily portfolio returns:
+
+```ts
+daily_return[i] = (holdingsValue[i] - holdingsValue[i-1]) / holdingsValue[i-1]
+volatility = stddev(daily_returns) * sqrt(252)
+```
+
+Computed on the full daily series filtered to the timeframe (not the sampled series) to preserve daily granularity.
+
+---
+
+### Benchmark Comparison (VOO)
+
+VOO historical prices are fetched alongside portfolio symbols.
+A normalized factor series is built aligned to the sampled portfolio dates:
+
+```ts
+benchmarkFactor[i] = VOO_price[i] / VOO_price[0]
+```
+
+Derived benchmark metrics:
+- `benchmarkReturn` = final factor - 1
+- `benchmarkCagr` = annualized benchmark return
+- `benchmarkVolatility` = annualized std-dev of daily VOO returns
+
+Derived relationship metrics (computed in frontend):
+- **Alpha** = portfolio CAGR − VOO CAGR (excess return)
+- **Sharpe Ratio** ≈ CAGR / Volatility (simplified, no risk-free rate)
+
+---
+
+## Future Work
+
+### Rolling Returns
+
+Compute rolling N-day/N-month TWR windows:
+
+```ts
+rolling_1y_twr[t] = TWR(t-365, t)
+```
+
+This would show whether recent performance is better or worse than historical averages and identify periods of outperformance.
+
+### LLM-Powered Narrative Insights
+
+Once the above metrics are available as structured data, an LLM could generate natural-language summaries such as:
+
+> "Your portfolio has returned +18.4% CAGR over 3 years, beating VOO by +3.2% (alpha), but with 22% higher volatility. Your Sharpe ratio of 1.4 is above the benchmark's 1.1."
+
+Integration approach: structured metric payload → LLM prompt → rendered insight card on the dashboard. Should be opt-in and clearly labelled as AI-generated.
+
+---
+
+## Guiding Principle
+
+Performance must reflect:
+
+> **how well the portfolio performed, not how much money was added**
+
+This is why:
+
+* TWR ignores deposits
+
+Both metrics are required for a complete view.

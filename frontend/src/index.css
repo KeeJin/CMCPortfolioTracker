@@ -1,0 +1,27 @@
+@import 'tailwindcss';
+
+:root {
+  color: #17324d;
+  background:
+    radial-gradient(circle at top left, rgba(196, 225, 255, 0.65), transparent 36%),
+    linear-gradient(180deg, #f8fbff 0%, #eef4f8 100%);
+  font-family: 'IBM Plex Sans', 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
