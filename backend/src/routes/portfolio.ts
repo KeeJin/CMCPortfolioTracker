@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 
-import { getAllBaselines, getAllTransactions, getAllUploads } from '../store.js';
+import { getAllBaselines, getAllTransactions, getAllUploads, readSupabaseDocument } from '../store.js';
 import { getPortfolioAnchor } from '../portfolioState.js';
 import { applyTransaction, reconstructState, sortTransactions } from '../reconstruction.js';
 import {
@@ -734,6 +734,12 @@ export function normalizeBankTransferPairsForAnalytics(transactions: Transaction
 }
 
 router.get('/', async (_req, res) => {
+  const prepared = await readSupabaseDocument<Record<string, unknown>>('portfolio_snapshot');
+  if (prepared) {
+    res.json(prepared);
+    return;
+  }
+
   const baselines = getAllBaselines();
   const transactions = normalizeBankTransferPairsForAnalytics(sanitizeTransactionsForAnalytics(getAllTransactions()));
   const anchor = getPortfolioAnchor(baselines, transactions);
@@ -767,7 +773,13 @@ router.get('/', async (_req, res) => {
   });
 });
 
-router.get('/history', (_req, res) => {
+router.get('/history', async (_req, res) => {
+  const prepared = await readSupabaseDocument<Record<string, unknown>>('portfolio_history');
+  if (prepared) {
+    res.json(prepared);
+    return;
+  }
+
   const baselines = getAllBaselines();
   const uploadsPath = path.resolve(process.cwd(), 'data/uploads.json');
   const uploads = fs.existsSync(uploadsPath)
@@ -790,6 +802,12 @@ router.get('/history', (_req, res) => {
 });
 
 router.get('/value', async (req: Request, res: Response) => {
+  const prepared = await readSupabaseDocument<Record<string, unknown>>('portfolio_value');
+  if (prepared) {
+    res.json(prepared);
+    return;
+  }
+
   const timeframe = String(req.query.timeframe ?? '1y');
   const pricingMethod = String(req.query.pricingMethod ?? 'yahoo_finance');
   const twrMode = String(req.query.twrMode ?? 'invested_capital');

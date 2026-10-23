@@ -9,7 +9,13 @@ const DATA_DIR = path.resolve(__dirname, '../data');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-type StoreDocumentKey = 'baselines' | 'transactions' | 'uploads';
+type StoreDocumentKey =
+  | 'baselines'
+  | 'transactions'
+  | 'uploads'
+  | 'portfolio_snapshot'
+  | 'portfolio_history'
+  | 'portfolio_value';
 
 const state = {
   baselines: [] as Baseline[],
@@ -41,7 +47,7 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-async function readSupabaseDocument<T>(key: StoreDocumentKey): Promise<T | null> {
+export async function readSupabaseDocument<T>(key: StoreDocumentKey): Promise<T | null> {
   if (!isSupabaseConfigured() || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return null;
   }

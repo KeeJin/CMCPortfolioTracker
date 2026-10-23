@@ -8,7 +8,6 @@ import baselineRouter from './routes/baseline.js';
 import portfolioRouter from './routes/portfolio.js';
 import { initStore } from './store.js';
 import { loadPriceCache } from './priceCache.js';
-import { startEagerLoading, startScheduledMarketRefresh } from './eagerLoader.js';
 import { requireAuth } from './middlewares/auth.js';
 
 const app = express();
@@ -40,7 +39,60 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.get('/api/health', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
+  const supabaseConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    service: 'portfolio-backend',
+    supabaseConfigured,
+  });
+});
+
+app.get('/api/health/db', async (_req, res) => {
+  const supabaseConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  if (!supabaseConfigured || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    res.status(200).json({
+      status: 'degraded',
+      database: 'not-configured',
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  try {
+    const response = await fetch(`${process.env.SUPABASE_URL}/rest/v1/cache_documents?select=key&limit=1`, {
+      method: 'GET',
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    });
+
+    if (!response.ok) {
+      res.status(503).json({
+        status: 'error',
+        database: 'unreachable',
+        httpStatus: response.status,
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    res.status(200).json({
+      status: 'ok',
+      database: 'connected',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown database health error';
+    res.status(503).json({
+      status: 'error',
+      database: 'unreachable',
+      error: message,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 app.use('/api/auth', authRouter);
@@ -56,8 +108,6 @@ void (async () => {
 
   app.listen(port, () => {
     console.log(`Backend server is running on port ${port}`);
-    // Kick off background price prefetch for all timeframes after server is ready.
-    startEagerLoading();
-    startScheduledMarketRefresh();
+    console.log('[startup] Production mode: server-light, no eager prefetch startup hooks');
   });
 })();
