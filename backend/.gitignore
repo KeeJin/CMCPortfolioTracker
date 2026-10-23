@@ -2,3 +2,10 @@ node_modules/
 dist/
 test-artifacts/
 backend/data/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.server.example
+!.env.manual-refresh.example

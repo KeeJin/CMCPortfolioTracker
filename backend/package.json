@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/app.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
-    "validate:pdf-samples": "node --loader ts-node/esm scripts/validatePdfSamples.ts"
+    "validate:pdf-samples": "node --loader ts-node/esm scripts/validatePdfSamples.ts",
+    "refresh:processed-cache": "node --loader ts-node/esm scripts/manual-refresh-processed-cache.ts"
   },
   "jest": {
     "preset": "ts-jest/presets/default-esm",
