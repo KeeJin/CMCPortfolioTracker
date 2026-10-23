@@ -1423,11 +1423,15 @@ export async function buildPortfolioValueResponse({
   const preBaselineTransactions = anchor.baseline
     ? resolvedTransactions.filter((tx) => tx.date < anchor.baseline!.date)
     : [];
-  const initialLots = buildInitialLotsFromBaselineAndPreBaselineTransactions(
-    anchor.baseline,
-    preBaselineTransactions,
-    fxPoints,
-  );
+  // When pre-baseline history is included in-range, replaying from transaction history
+  // already reconstructs historical lots; seeding with baseline lots would double-count.
+  const initialLots = includePreBaselineHistory
+    ? new Map<string, { quantity: number; totalCostUsd: number }>()
+    : buildInitialLotsFromBaselineAndPreBaselineTransactions(
+      anchor.baseline,
+      preBaselineTransactions,
+      fxPoints,
+    );
   const realizedGains = computeRealizedGainsForRange(txs, effectiveStartDate, end, fxPoints);
   const costBasisAtStart = buildAverageCostBasisBySymbol(txs, effectiveStartDate, fxPoints, initialLots);
   const costBasisAtEnd = buildAverageCostBasisBySymbol(txs, end, fxPoints, initialLots);
@@ -1442,32 +1446,54 @@ export async function buildPortfolioValueResponse({
     }
   }
 
-  const contributionSymbols = new Set<string>([
-    ...Object.keys(realizedGains),
-    ...[...costBasisAtStart.keys()],
-    ...[...costBasisAtEnd.keys()],
+  // Contribution decomposition (currency P&L) by symbol:
+  // contribution = realized gain/loss within range
+  //              + change in unrealized P&L on carried/open lots
+  //              + dividends.
+  // This ties attribution directly to P&L components rather than gross trade cashflows.
+  const startHoldings = holdingsByDate.get(effectiveStartDate) ?? {};
+  const allContributionSymbols = new Set<string>([
+    ...Object.keys(startHoldings),
+    ...Object.keys(latestState.holdings),
+    ...txs.filter((tx) => tx.date >= effectiveStartDate && tx.date <= end && tx.symbol).map((tx) => tx.symbol as string),
   ]);
 
-  for (const symbol of contributionSymbols) {
+  const dividendsBySymbol: Record<string, number> = {};
+
+  for (const tx of txs) {
+    if (!tx.symbol || tx.date < effectiveStartDate || tx.date > end) {
+      continue;
+    }
+
+    if (tx.type === 'DIVIDEND') {
+      const amountUsd = convertSgdToUsd(Math.abs(tx.amount), tx.date, fxPoints);
+      dividendsBySymbol[tx.symbol] = (dividendsBySymbol[tx.symbol] ?? 0) + amountUsd;
+    }
+  }
+
+  for (const symbol of allContributionSymbols) {
     const symbolPriceSeries = priceSeries[symbol] ?? [];
-    const startPrice = getLastPriceOnOrBefore(symbolPriceSeries, effectiveStartDate);
-    const endPrice = getLastPriceOnOrBefore(symbolPriceSeries, end);
+    const startPrice = getLastPriceOnOrBefore(symbolPriceSeries, effectiveStartDate) ?? 0;
+    const endPrice = getLastPriceOnOrBefore(symbolPriceSeries, end) ?? startPrice;
 
-    const startBasis = costBasisAtStart.get(symbol);
-    const endBasis = costBasisAtEnd.get(symbol);
+    const startQuantity = Number(startHoldings[symbol] ?? 0);
+    const endQuantity = Number(latestState.holdings[symbol] ?? 0);
 
-    const startUnrealized =
-      startBasis && startBasis.quantity > 0 && startPrice !== null
-        ? startBasis.quantity * (startPrice - startBasis.totalCostUsd / startBasis.quantity)
-        : 0;
+    const startLot = costBasisAtStart.get(symbol);
+    const endLot = costBasisAtEnd.get(symbol);
+    const startAverageCost = startLot && startLot.quantity > 0
+      ? startLot.totalCostUsd / startLot.quantity
+      : 0;
+    const endAverageCost = endLot && endLot.quantity > 0
+      ? endLot.totalCostUsd / endLot.quantity
+      : 0;
 
-    const endUnrealized =
-      endBasis && endBasis.quantity > 0 && endPrice !== null
-        ? endBasis.quantity * (endPrice - endBasis.totalCostUsd / endBasis.quantity)
-        : 0;
+    const unrealizedAtStart = (startPrice - startAverageCost) * startQuantity;
+    const unrealizedAtEnd = (endPrice - endAverageCost) * endQuantity;
+    const realizedGain = realizedGains[symbol] ?? 0;
+    const dividendIncome = dividendsBySymbol[symbol] ?? 0;
 
-    const realized = realizedGains[symbol] ?? 0;
-    const contribution = realized + (endUnrealized - startUnrealized);
+    const contribution = realizedGain + (unrealizedAtEnd - unrealizedAtStart) + dividendIncome;
     if (Math.abs(contribution) > 1e-9) {
       positionContributions[symbol] = contribution;
     }
