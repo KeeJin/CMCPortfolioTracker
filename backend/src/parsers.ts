@@ -398,6 +398,12 @@ export function parseTransactionText(text: string, source: string): ParseTransac
 
     if (referenceStart >= 0 && descriptionStart > referenceStart && debitStart > descriptionStart && creditStart > debitStart && balanceStart > creditStart) {
       const statementRows: string[] = [];
+      const localAccepted: Transaction[] = [];
+      const localErrors: Array<{ row: unknown; reason: string }> = [];
+      let localRowsConsidered = 0;
+      let localUnknownTypeRows = 0;
+      let localHeuristicClassifiedRows = 0;
+
       type StatementRow = { base: string; continuation: string[] };
       const statementRowParts: StatementRow[] = [];
       let currentRow: StatementRow | null = null;
@@ -460,39 +466,43 @@ export function parseTransactionText(text: string, source: string): ParseTransac
           credit,
         };
 
-        rowsConsidered += 1;
+        localRowsConsidered += 1;
         const parsedRow = parseRow({ ...row, source });
         if (parsedRow.unknownType) {
-          unknownTypeRows += 1;
-          errors.push({ row: compact, reason: 'Unknown transaction type from description' });
+          localUnknownTypeRows += 1;
+          localErrors.push({ row: compact, reason: 'Unknown transaction type from description' });
           continue;
         }
         if (!parsedRow.transaction) {
-          errors.push({ row: compact, reason: 'Unable to parse extracted statement row' });
+          localErrors.push({ row: compact, reason: 'Unable to parse extracted statement row' });
           continue;
         }
 
         if (parsedRow.heuristicClassified) {
-          heuristicClassifiedRows += 1;
+          localHeuristicClassifiedRows += 1;
         }
-        accepted.push(parsedRow.transaction);
+        localAccepted.push(parsedRow.transaction);
       }
 
-      appendMissingFxReferenceErrors(text, source, accepted, errors);
-      return {
-        accepted,
-        errors,
-        duplicates: 0,
-        parseErrors: errors.length,
-        diagnostics: {
-          rowsConsidered,
-          acceptedRows: accepted.length,
-          unknownTypeRows,
-          heuristicClassifiedRows,
-          unknownTypeRate: rowsConsidered === 0 ? 0 : unknownTypeRows / rowsConsidered,
-          heuristicClassifiedRate: rowsConsidered === 0 ? 0 : heuristicClassifiedRows / rowsConsidered,
-        },
-      };
+      // If fixed-column extraction did not yield any parseable transactions,
+      // fall through to the more permissive line parser below.
+      if (localAccepted.length > 0) {
+        appendMissingFxReferenceErrors(text, source, localAccepted, localErrors);
+        return {
+          accepted: localAccepted,
+          errors: localErrors,
+          duplicates: 0,
+          parseErrors: localErrors.length,
+          diagnostics: {
+            rowsConsidered: localRowsConsidered,
+            acceptedRows: localAccepted.length,
+            unknownTypeRows: localUnknownTypeRows,
+            heuristicClassifiedRows: localHeuristicClassifiedRows,
+            unknownTypeRate: localRowsConsidered === 0 ? 0 : localUnknownTypeRows / localRowsConsidered,
+            heuristicClassifiedRate: localRowsConsidered === 0 ? 0 : localHeuristicClassifiedRows / localRowsConsidered,
+          },
+        };
+      }
     }
   }
 
@@ -515,21 +525,28 @@ export function parseTransactionText(text: string, source: string): ParseTransac
     }
 
     const [, date, reference, tailRaw] = headMatch;
-    let tail = tailRaw.trim();
+    const tail = tailRaw.trim();
 
-    const balanceMatch = tail.match(/\s([0-9][0-9,]*(?:\.\d+)?(?:Cr|Dr)?)$/i);
-    if (!balanceMatch) {
+    // Support both:
+    // 1) "... <amount> <balance>" (common CMC statement rows)
+    // 2) "... <amount>" (converted transaction text rows)
+    const trailingTokensMatch = tail.match(
+      /(?:^|\s)([0-9][0-9,]*(?:\.\d+)?(?:Cr|Dr)?)(?:\s+([0-9][0-9,]*(?:\.\d+)?(?:Cr|Dr)?))?$/i,
+    );
+    if (!trailingTokensMatch) {
       continue;
     }
-    tail = tail.slice(0, -balanceMatch[0].length).trim();
 
-    const amountMatch = tail.match(/\s([0-9][0-9,]*(?:\.\d+)?)$/);
-    if (!amountMatch) {
+    const amountTokenRaw = trailingTokensMatch[2] ? trailingTokensMatch[1] : trailingTokensMatch[1];
+    const amountTokenCandidate = trailingTokensMatch[2] ? trailingTokensMatch[1] : trailingTokensMatch[1];
+    const amountToken = String(amountTokenCandidate).replace(/(Cr|Dr)$/i, '');
+    if (!/^\d[\d,]*(?:\.\d+)?$/.test(amountToken)) {
       continue;
     }
 
-    const amountToken = amountMatch[1];
-    const description = tail.slice(0, -amountMatch[0].length).trim();
+    const description = trailingTokensMatch[2]
+      ? tail.slice(0, tail.length - (` ${trailingTokensMatch[1]} ${trailingTokensMatch[2]}`).length).trim()
+      : tail.slice(0, tail.length - (` ${amountTokenRaw}`).length).trim();
     const type = detectType(description);
     if (type === 'UNKNOWN') {
       rowsConsidered += 1;
