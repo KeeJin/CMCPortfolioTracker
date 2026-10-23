@@ -19,7 +19,9 @@ import type {
   PortfolioResponse,
   PortfolioValuePoint,
   PortfolioValueResponse,
+  SyncStatusResult,
   UploadBaselineResponse,
+  UploadSyncStatus,
   UploadTransactionsResponse,
 } from './types'
 
@@ -181,6 +183,31 @@ function getErrorMessage(error: unknown): string {
   }
 
   return 'Unexpected error'
+}
+
+function getFailedSyncItems(syncStatus?: UploadSyncStatus): Array<{ key: string; result: SyncStatusResult }> {
+  if (!syncStatus) return []
+
+  const entries: Array<{ key: string; result: SyncStatusResult | undefined }> = [
+    { key: 'baselines', result: syncStatus.baselines },
+    { key: 'transactions', result: syncStatus.transactions },
+    { key: 'uploads', result: syncStatus.uploads },
+  ]
+
+  return entries.filter((entry): entry is { key: string; result: SyncStatusResult } => Boolean(entry.result && entry.result.attempted && !entry.result.success))
+}
+
+function formatSyncFailureMessage(syncStatus?: UploadSyncStatus): string | null {
+  const failed = getFailedSyncItems(syncStatus)
+  if (failed.length === 0) {
+    return null
+  }
+
+  const details = failed
+    .map(({ key, result }) => `${key}: ${result.error ?? 'Unknown error'}`)
+    .join(' | ')
+
+  return `Saved locally, but Supabase sync failed (${details}).`
 }
 
 function formatXAxisLabel(date: string, timeframe: PortfolioTimeframe, seriesStartDate?: string): string {
@@ -722,6 +749,7 @@ function App() {
   const [transactionsModalOpen, setTransactionsModalOpen] = useState(false)
   const [manualTradeModalOpen, setManualTradeModalOpen] = useState(false)
   const [manualTradeUpload, setManualTradeUpload] = useState<UploadState<ManualTradeResponse>>(EMPTY_UPLOAD_STATE)
+  const [syncWarning, setSyncWarning] = useState<string | null>(null)
   const [manualTradeForm, setManualTradeForm] = useState<ManualTradeFormState>(DEFAULT_MANUAL_TRADE_FORM)
   const [authUser, setAuthUser] = useState<{ email: string } | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -987,6 +1015,7 @@ function App() {
     try {
       const result = await uploadBaseline(baselineFile)
       setBaselineUpload({ loading: false, error: null, result, fileName: baselineFile.name })
+      setSyncWarning(formatSyncFailureMessage(result.syncStatus))
       setBaselineModalOpen(false)
       setBaselineFile(null)
       void refreshDashboard()
@@ -1013,6 +1042,7 @@ function App() {
     try {
       const result = await uploadTransactions(transactionFile)
       setTransactionUpload({ loading: false, error: null, result, fileName: transactionFile.name })
+      setSyncWarning(formatSyncFailureMessage(result.syncStatus))
       setTransactionsModalOpen(false)
       setTransactionFile(null)
       void refreshDashboard()
@@ -1115,6 +1145,7 @@ function App() {
     try {
       const result = await createManualTrade(payload)
       setManualTradeUpload({ loading: false, error: null, result, fileName: 'manual-entry' })
+      setSyncWarning(formatSyncFailureMessage(result.syncStatus))
       setManualTradeModalOpen(false)
       setManualTradeForm(DEFAULT_MANUAL_TRADE_FORM)
       void refreshDashboard()
@@ -1342,9 +1373,19 @@ function App() {
                 Baseline uploaded: {baselineUpload.result.baseline.date}
               </span>
             )}
+            {baselineUpload.result?.syncStatus && getFailedSyncItems(baselineUpload.result.syncStatus).length > 0 && (
+              <span className="rounded-full border border-amber-300/35 bg-amber-500/15 px-3 py-1 text-amber-100">
+                Baseline sync warning
+              </span>
+            )}
             {transactionUpload.result && (
               <span className="rounded-full border border-emerald-300/30 bg-emerald-500/15 px-3 py-1 text-emerald-100">
                 Transactions imported: {transactionUpload.result.added}
+              </span>
+            )}
+            {transactionUpload.result?.syncStatus && getFailedSyncItems(transactionUpload.result.syncStatus).length > 0 && (
+              <span className="rounded-full border border-amber-300/35 bg-amber-500/15 px-3 py-1 text-amber-100">
+                Transactions sync warning
               </span>
             )}
             {manualTradeUpload.result && (
@@ -1352,10 +1393,21 @@ function App() {
                 Manual trade added: {manualTradeUpload.result.transaction.symbol ?? manualTradeUpload.result.transaction.id}
               </span>
             )}
+            {manualTradeUpload.result?.syncStatus && getFailedSyncItems(manualTradeUpload.result.syncStatus).length > 0 && (
+              <span className="rounded-full border border-amber-300/35 bg-amber-500/15 px-3 py-1 text-amber-100">
+                Manual trade sync warning
+              </span>
+            )}
           </div>
         </header>
 
         <main className="mt-6 grid gap-6 xl:grid-cols-2">
+          {syncWarning && (
+            <div className="xl:col-span-2 rounded-xl border border-amber-300/35 bg-amber-500/12 p-4 text-sm text-amber-100">
+              {syncWarning}
+            </div>
+          )}
+
           <section className="rounded-2xl border border-white/10 bg-slate-900/65 p-6 shadow-xl backdrop-blur-sm">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h2 className="text-xl font-semibold text-white">Portfolio</h2>
@@ -1906,9 +1958,16 @@ function App() {
           )}
 
           {baselineUpload.result && (
-            <div className="rounded-lg border border-emerald-300/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">
-              {RECONCILIATION_MESSAGES[baselineUpload.result.reconciliation?.status ?? 'MATCH']}
-            </div>
+            <>
+              <div className="rounded-lg border border-emerald-300/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">
+                {RECONCILIATION_MESSAGES[baselineUpload.result.reconciliation?.status ?? 'MATCH']}
+              </div>
+              {formatSyncFailureMessage(baselineUpload.result.syncStatus) && (
+                <div className="rounded-lg border border-amber-300/35 bg-amber-500/12 p-3 text-sm text-amber-100">
+                  {formatSyncFailureMessage(baselineUpload.result.syncStatus)}
+                </div>
+              )}
+            </>
           )}
 
           <button
@@ -1945,9 +2004,16 @@ function App() {
           )}
 
           {transactionUpload.result && (
-            <div className="rounded-lg border border-emerald-300/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">
-              Imported {transactionUpload.result.added}, duplicates {transactionUpload.result.duplicates}, parse errors {transactionUpload.result.parseErrors}
-            </div>
+            <>
+              <div className="rounded-lg border border-emerald-300/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">
+                Imported {transactionUpload.result.added}, duplicates {transactionUpload.result.duplicates}, parse errors {transactionUpload.result.parseErrors}
+              </div>
+              {formatSyncFailureMessage(transactionUpload.result.syncStatus) && (
+                <div className="rounded-lg border border-amber-300/35 bg-amber-500/12 p-3 text-sm text-amber-100">
+                  {formatSyncFailureMessage(transactionUpload.result.syncStatus)}
+                </div>
+              )}
+            </>
           )}
 
           <button
@@ -2177,6 +2243,12 @@ function App() {
           {manualTradeUpload.error && (
             <div className="rounded-lg border border-rose-400/30 bg-rose-500/10 p-3 text-sm text-rose-100">
               {manualTradeUpload.error}
+            </div>
+          )}
+
+          {manualTradeUpload.result && formatSyncFailureMessage(manualTradeUpload.result.syncStatus) && (
+            <div className="rounded-lg border border-amber-300/35 bg-amber-500/12 p-3 text-sm text-amber-100">
+              {formatSyncFailureMessage(manualTradeUpload.result.syncStatus)}
             </div>
           )}
 

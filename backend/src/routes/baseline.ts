@@ -36,7 +36,7 @@ function readTextFromUpload(file: Express.Multer.File): string {
   }
 }
 
-router.post('/', upload.single('file'), (req, res) => {
+router.post('/', upload.single('file'), async (req, res) => {
   const file = req.file;
   if (!file) {
     res.status(400).json({ error: 'A baseline file is required.' });
@@ -56,8 +56,8 @@ router.post('/', upload.single('file'), (req, res) => {
     const latestBaseline = allBaselines.length > 0 ? allBaselines[allBaselines.length - 1] : null;
     const baseline = { ...parsed.baseline, id: `baseline-${parsed.baseline.date}-${Date.now()}` };
 
-    addBaseline(baseline);
-    addUpload({
+    const baselineResult = await addBaseline(baseline);
+    const uploadResult = await addUpload({
       id: `upload-${Date.now()}`,
       type: 'BASELINE',
       filename: file.originalname,
@@ -76,10 +76,14 @@ router.post('/', upload.single('file'), (req, res) => {
     }
 
     res.status(201).json({
-      baseline,
+      baseline: baselineResult.baseline,
       reconciliation: reconciliation
         ? { status: reconciliation.status, notes: reconciliation.notes }
         : undefined,
+      syncStatus: {
+        baselines: baselineResult.supabaseSync,
+        uploads: uploadResult.supabaseSync,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected baseline parsing failure.';
