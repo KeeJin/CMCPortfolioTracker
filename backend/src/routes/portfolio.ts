@@ -604,6 +604,53 @@ export function computeRealizedGainsForRange(
   return realizedBySymbol;
 }
 
+function buildAverageCostBasisBySymbol(
+  transactions: Transaction[],
+  endDate: string,
+  fxPoints: PricePoint[],
+) {
+  const costBasisBySymbol = new Map<string, { quantity: number; totalCostUsd: number }>();
+  const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
+
+  for (const tx of sorted) {
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+      continue;
+    }
+
+    const quantity = Math.abs(tx.quantity);
+    const amountUsd = convertSgdToUsd(Math.abs(tx.amount), tx.date, fxPoints);
+    const basis = costBasisBySymbol.get(tx.symbol) ?? { quantity: 0, totalCostUsd: 0 };
+
+    if (tx.type === 'BUY') {
+      basis.quantity += quantity;
+      basis.totalCostUsd += amountUsd;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    const averageCostUsd = basis.quantity > 0 ? basis.totalCostUsd / basis.quantity : 0;
+    const removedCostUsd = averageCostUsd * quantity;
+    basis.quantity = Math.max(0, basis.quantity - quantity);
+    basis.totalCostUsd = Math.max(0, basis.totalCostUsd - removedCostUsd);
+    costBasisBySymbol.set(tx.symbol, basis);
+  }
+
+  return costBasisBySymbol;
+}
+
+function getLastPriceOnOrBefore(points: Array<{ date: string; price: number }>, date: string): number | null {
+  if (points.length === 0) {
+    return null;
+  }
+
+  const point = [...points].reverse().find((candidate) => candidate.date <= date) ?? points[0];
+  if (!point || !Number.isFinite(point.price)) {
+    return null;
+  }
+
+  return point.price;
+}
+
 // Only true bank-account in/out should be treated as external performance flows.
 // Internal FX settlement rows are cash mechanics of trade execution and must be excluded.
 export function isUserControlledExternalFlow(tx: Pick<Transaction, 'type' | 'rawDescription'>): boolean {
@@ -1049,6 +1096,9 @@ export async function buildPortfolioValueResponse({
   }
 
   const latestState = reconstructState(anchor.baseline, txs);
+  const realizedGains = computeRealizedGainsForRange(txs, effectiveStartDate, end, fxPoints);
+  const costBasisAtStart = buildAverageCostBasisBySymbol(txs, effectiveStartDate, fxPoints);
+  const costBasisAtEnd = buildAverageCostBasisBySymbol(txs, end, fxPoints);
   const positionValues: Record<string, number> = {};
   const positionContributions: Record<string, number> = {};
 
@@ -1060,17 +1110,36 @@ export async function buildPortfolioValueResponse({
     }
   }
 
-  const baselineState = reconstructState(anchor.baseline, txs.filter((tx) => tx.date <= startDateFiltered));
-  for (const [symbol, quantity] of Object.entries(baselineState.holdings)) {
-    const startPoints = priceSeries[symbol] ?? [];
-    const startPoint = [...startPoints].reverse().find((point) => point.date <= startDateFiltered) ?? startPoints[0];
-    const endPoint = [...startPoints].reverse().find((point) => point.date <= end) ?? startPoints[startPoints.length - 1];
-    if (startPoint && endPoint) {
-      positionContributions[symbol] = quantity * (endPoint.price - startPoint.price);
+  const contributionSymbols = new Set<string>([
+    ...Object.keys(realizedGains),
+    ...[...costBasisAtStart.keys()],
+    ...[...costBasisAtEnd.keys()],
+  ]);
+
+  for (const symbol of contributionSymbols) {
+    const symbolPriceSeries = priceSeries[symbol] ?? [];
+    const startPrice = getLastPriceOnOrBefore(symbolPriceSeries, effectiveStartDate);
+    const endPrice = getLastPriceOnOrBefore(symbolPriceSeries, end);
+
+    const startBasis = costBasisAtStart.get(symbol);
+    const endBasis = costBasisAtEnd.get(symbol);
+
+    const startUnrealized =
+      startBasis && startBasis.quantity > 0 && startPrice !== null
+        ? startBasis.quantity * (startPrice - startBasis.totalCostUsd / startBasis.quantity)
+        : 0;
+
+    const endUnrealized =
+      endBasis && endBasis.quantity > 0 && endPrice !== null
+        ? endBasis.quantity * (endPrice - endBasis.totalCostUsd / endBasis.quantity)
+        : 0;
+
+    const realized = realizedGains[symbol] ?? 0;
+    const contribution = realized + (endUnrealized - startUnrealized);
+    if (Math.abs(contribution) > 1e-9) {
+      positionContributions[symbol] = contribution;
     }
   }
-
-  const realizedGains = computeRealizedGainsForRange(txs, effectiveStartDate, end, fxPoints);
 
   const response: Record<string, unknown> = {
     date: new Date().toISOString().slice(0, 10),

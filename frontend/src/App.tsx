@@ -573,7 +573,7 @@ function ContributionChart({
           </p>
         </div>
         <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Start Holdings ({timeframe.toUpperCase()})</p>
+          <p className="text-xs uppercase tracking-[0.14em] text-slate-400">Period P&L ({timeframe.toUpperCase()})</p>
           <p className={`mt-1 text-lg font-semibold ${netContribution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {fmtContrib(netContribution)}
           </p>
@@ -582,8 +582,8 @@ function ContributionChart({
 
       {typeof portfolioGainDifference === 'number' && Math.abs(portfolioGainDifference) > 1 && (
         <div className="rounded-xl border border-amber-300/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
-          This chart reflects only the price change on positions already held at the start of the period.
-          Cash flows, deposits, withdrawals, and new trades are excluded, so it can differ from the total portfolio gain.
+          This chart reflects symbol-level period P&L contribution (realized + unrealized) within the selected timeframe.
+          It can still differ from total portfolio gain due to cash carry, FX path effects, and attribution residuals.
         </div>
       )}
 
@@ -1799,8 +1799,8 @@ function App() {
                 <div>
                   <h2 className="text-xl font-semibold text-white">Contribution Analysis</h2>
                   <p className="mt-0.5 text-xs text-slate-400">
-                    Price-return contribution from positions held at the start of the selected timeframe ({timeframe.toUpperCase()}).
-                    Shows how start-of-period holdings price movement added or removed in {displayCurrency}.
+                    Symbol-level period P&L contribution over the selected timeframe ({timeframe.toUpperCase()}).
+                    Includes both realized and unrealized gain/loss movement in {displayCurrency}.
                   </p>
                 </div>
               </div>
@@ -1864,16 +1864,16 @@ function App() {
 
               {portfolioValue.realizedGains && Object.keys(portfolioValue.realizedGains).length > 0 && (
                 <div className="mt-8">
-                  <h3 className="mb-1 text-base font-semibold text-slate-200">Realized Gains (since baseline)</h3>
+                  <h3 className="mb-1 text-base font-semibold text-slate-200">Realized Gains (within timeframe)</h3>
                   <p className="mb-4 text-xs text-slate-400">
                     Closed positions: (sale price − average buy price) × shares sold, priced in USD via Yahoo Finance.
-                    This reflects actual locked-in profit or loss from trades completed after the baseline.
+                    This reflects locked-in profit or loss from sells that occurred within the selected period.
                   </p>
                   <ContributionChart
                     contributions={portfolioValue.realizedGains}
                     displayCurrency={displayCurrency}
                     usdSgdRate={usdSgdRate}
-                    timeframe="all"
+                    timeframe={timeframe}
                     portfolioGain={totalValueChange}
                   />
                 </div>
