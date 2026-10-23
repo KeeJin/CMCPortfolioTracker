@@ -156,6 +156,67 @@ export function calculateTwrFromSeries(series: Array<{ date: string; totalValue:
   return cumulative - 1;
 }
 
+function calculateCumulativeTwrFactorSeries(
+  series: Array<{ date: string; totalValue: number }>,
+  flows: Array<{ date: string; amount: number }>,
+) {
+  if (series.length === 0) {
+    return [] as number[];
+  }
+
+  const factors = [1];
+  let cumulative = 1;
+
+  for (let index = 1; index < series.length; index += 1) {
+    const previous = series[index - 1];
+    const current = series[index];
+
+    const flow = flows
+      .filter((entry) => entry.date > previous.date && entry.date <= current.date)
+      .reduce((sum, entry) => sum + entry.amount, 0);
+
+    const adjustedStart = previous.totalValue + flow;
+    const periodReturn = adjustedStart === 0 ? 0 : (current.totalValue - adjustedStart) / adjustedStart;
+    cumulative *= 1 + periodReturn;
+    factors.push(cumulative);
+  }
+
+  return factors;
+}
+
+async function fetchBenchmarkSeriesWithFallback(
+  candidates: string[],
+  sampledDates: string[],
+  startDate: string,
+  effectiveStartDate: string,
+  rangeEnd: string,
+) {
+  const uniqueStarts = [...new Set([startDate, effectiveStartDate])];
+
+  for (const benchmarkCandidate of candidates) {
+    for (const candidateStart of uniqueStarts) {
+      const benchmarkHistory = await fetchYahooFinanceHistoricalPrices([benchmarkCandidate], candidateStart, rangeEnd);
+      const benchmarkPoints = benchmarkHistory.history[benchmarkCandidate] ?? [];
+      if (benchmarkPoints.length === 0) {
+        continue;
+      }
+
+      const normalized = buildNormalizedBenchmarkSeries(sampledDates, benchmarkPoints);
+      if (normalized.length === 0) {
+        continue;
+      }
+
+      return {
+        symbol: benchmarkCandidate,
+        normalized,
+        points: benchmarkPoints,
+      };
+    }
+  }
+
+  return null;
+}
+
 // Modified TWR for active positions only (ignores idle cash):
 // - portfolio value = holdings market value only
 // - BUY amount = external inflow (capital deployed into active positions)
@@ -1192,8 +1253,19 @@ export async function buildPortfolioValueResponse({
   );
   const twrSymbolContributionTotal = Object.values(twrSymbolContributions).reduce((sum, value) => sum + value, 0);
   const twrResidualBreakdown = computeTwrResidualBreakdown(attributionSeries, attributionFlows, twrSymbolContributionTotal);
+  const accountStartValue = series[0]?.totalValue ?? 0;
+  const hasValidAccountStartBase = validTwrMode === 'account_total'
+    ? Number.isFinite(accountStartValue) && accountStartValue > 0
+    : true;
+
+  const displayTwr = hasValidAccountStartBase ? twr : null;
   const years = Math.max((new Date(end).getTime() - new Date(effectiveStartDate).getTime()) / (365.25 * 86400 * 1000), 1 / 12);
-  const cagr = (1 + twr) ** (1 / years) - 1;
+  const cagr = displayTwr === null ? null : (1 + displayTwr) ** (1 / years) - 1;
+
+  const displayTwrSeries = calculateCumulativeTwrFactorSeries(
+    attributionSeries.map((entry) => ({ date: entry.date, totalValue: entry.totalValue })),
+    attributionFlows,
+  );
 
   let benchmarkTwrSeries = series.map(() => 1);
   let benchmarkReturn = 0;
@@ -1203,28 +1275,23 @@ export async function buildPortfolioValueResponse({
 
   const sampledDatesForBenchmark = series.map((entry) => entry.date);
   const benchmarkCandidates = ['^GSPC', 'VOO'];
-  for (const benchmarkCandidate of benchmarkCandidates) {
-    const benchmarkHistory = await fetchYahooFinanceHistoricalPrices([benchmarkCandidate], startDate, rangeEnd);
-    const benchmarkPoints = benchmarkHistory.history[benchmarkCandidate] ?? [];
-    if (benchmarkPoints.length === 0) {
-      continue;
-    }
-
-    const normalized = buildNormalizedBenchmarkSeries(sampledDatesForBenchmark, benchmarkPoints);
-    if (normalized.length === 0) {
-      continue;
-    }
-
-    benchmarkTwrSeries = normalized;
-    benchmarkSymbol = benchmarkCandidate;
-    const first = normalized[0] ?? 1;
-    const last = normalized[normalized.length - 1] ?? first;
+  const benchmarkResult = await fetchBenchmarkSeriesWithFallback(
+    benchmarkCandidates,
+    sampledDatesForBenchmark,
+    startDate,
+    effectiveStartDate,
+    rangeEnd,
+  );
+  if (benchmarkResult) {
+    benchmarkTwrSeries = benchmarkResult.normalized;
+    benchmarkSymbol = benchmarkResult.symbol;
+    const first = benchmarkResult.normalized[0] ?? 1;
+    const last = benchmarkResult.normalized[benchmarkResult.normalized.length - 1] ?? first;
     benchmarkReturn = first === 0 ? 0 : last / first - 1;
     benchmarkCagr = (1 + benchmarkReturn) ** (1 / years) - 1;
     benchmarkVolatility = calculateAnnualizedVolatilityFromPriceSeries(
-      benchmarkPoints.filter((point) => point.date >= effectiveStartDate && point.date <= end),
+      benchmarkResult.points.filter((point) => point.date >= effectiveStartDate && point.date <= end),
     );
-    break;
   }
 
   const latestState = reconstructState(anchor.baseline, txs);
@@ -1291,15 +1358,15 @@ export async function buildPortfolioValueResponse({
     // Flow-adjusted gain/loss helps explain performance independent of user cash movements.
     totalGainLoss: (endValue - startValue) - netExternalFlow,
     netExternalFlow,
-    twr,
+    twr: displayTwr ?? undefined,
     twrMode: validTwrMode,
     accountTwr,
     investedCapitalTwr,
-    cagr,
+    cagr: cagr ?? undefined,
     pricingMethod,
     timeframe: validTimeframe,
     series,
-    twrSeries: series.map((entry) => entry.totalValue / series[0].totalValue),
+    twrSeries: displayTwrSeries,
     benchmarkTwrSeries,
     benchmarkReturn,
     benchmarkCagr,
