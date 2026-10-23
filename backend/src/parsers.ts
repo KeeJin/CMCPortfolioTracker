@@ -228,6 +228,20 @@ function extractPrice(description: string): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+function extractSplitRatio(description: string): number | null {
+  const ratioPattern = /(\d+(?:\.\d+)?)\s*(?::|for|to)\s*(\d+(?:\.\d+)?)/i;
+  const match = description.match(ratioPattern);
+  if (!match) return null;
+
+  const numerator = Number(match[1]);
+  const denominator = Number(match[2]);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0 || numerator <= 0) {
+    return null;
+  }
+
+  return numerator / denominator;
+}
+
 function detectType(description: string): TransactionType | 'UNKNOWN' {
   const normalized = description.toLowerCase();
 
@@ -262,9 +276,13 @@ function parseRow(row: Record<string, string | number | null | undefined>): Pars
   const symbol = extractSymbol(description);
   const quantity = initialType === 'BUY' || initialType === 'SELL' ? extractQuantity(description) : null;
   const price = initialType === 'BUY' || initialType === 'SELL' ? extractPrice(description) : null;
+  const splitRatio = initialType === 'SPLIT' ? extractSplitRatio(description) : null;
   const computedTradeValue = (quantity !== null && price !== null) ? roundCurrencyValue(quantity * price) : null;
 
   let amount = credit !== null ? credit : debit !== null ? -debit : 0;
+  if (initialType === 'SPLIT') {
+    amount = 0;
+  }
   if (initialType === 'BUY' || initialType === 'SELL') {
     if (initialType === 'BUY' && debit !== null && computedTradeValue !== null) {
       const delta = Math.abs(debit - computedTradeValue);
@@ -299,7 +317,7 @@ function parseRow(row: Record<string, string | number | null | undefined>): Pars
     quantity,
     price,
     amount,
-    splitRatio: null,
+    splitRatio,
     rawDescription: description,
     source: String(row.source ?? ''),
   };
