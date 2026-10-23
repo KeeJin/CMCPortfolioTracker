@@ -35,6 +35,8 @@ const headers = {
   'Content-Type': 'application/json',
 };
 
+const MANUAL_REFRESH_CONCURRENCY = Math.max(1, Number(process.env.MANUAL_REFRESH_CONCURRENCY ?? '1'));
+
 function toJsonSize(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
@@ -243,10 +245,51 @@ async function buildPortfolioValue(baselines: Baseline[], transactions: Transact
   const pricingMethod = 'yahoo_finance';
   const byTimeframe: Record<string, Record<string, unknown>> = {};
 
-  for (const timeframe of PORTFOLIO_TIMEFRAMES) {
-    byTimeframe[timeframe] = {};
+  logInfo('Precompute concurrency settings', {
+    totalCombinations: PORTFOLIO_TIMEFRAMES.length * PORTFOLIO_TWR_MODES.length,
+    concurrency: MANUAL_REFRESH_CONCURRENCY,
+    mode: MANUAL_REFRESH_CONCURRENCY <= 1 ? 'serial' : 'concurrent',
+  });
 
-    for (const twrMode of PORTFOLIO_TWR_MODES) {
+  if (MANUAL_REFRESH_CONCURRENCY <= 1) {
+    for (const timeframe of PORTFOLIO_TIMEFRAMES) {
+      byTimeframe[timeframe] = {};
+
+      for (const twrMode of PORTFOLIO_TWR_MODES) {
+        logInfo('Precomputing portfolio value payload', {
+          timeframe,
+          twrMode,
+          pricingMethod,
+        });
+
+        const payload = await buildPortfolioValueResponse({
+          timeframe,
+          pricingMethod,
+          twrMode,
+          includeDebug: false,
+          baselines,
+          transactions,
+          uploads,
+        });
+
+        byTimeframe[timeframe][twrMode] = payload;
+      }
+    }
+  } else {
+    type Combo = { timeframe: (typeof PORTFOLIO_TIMEFRAMES)[number]; twrMode: (typeof PORTFOLIO_TWR_MODES)[number] };
+    const combos: Combo[] = [];
+
+    for (const timeframe of PORTFOLIO_TIMEFRAMES) {
+      byTimeframe[timeframe] = {};
+      for (const twrMode of PORTFOLIO_TWR_MODES) {
+        combos.push({ timeframe, twrMode });
+      }
+    }
+
+    const totalCombos = combos.length;
+    let completedCombos = 0;
+
+    const runCombo = async ({ timeframe, twrMode }: Combo) => {
       logInfo('Precomputing portfolio value payload', {
         timeframe,
         twrMode,
@@ -264,7 +307,30 @@ async function buildPortfolioValue(baselines: Baseline[], transactions: Transact
       });
 
       byTimeframe[timeframe][twrMode] = payload;
-    }
+      completedCombos += 1;
+
+      if (completedCombos % 3 === 0 || completedCombos === totalCombos) {
+        logInfo('Precompute progress', {
+          completed: completedCombos,
+          total: totalCombos,
+        });
+      }
+    };
+
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(MANUAL_REFRESH_CONCURRENCY, totalCombos) }, async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= totalCombos) {
+          return;
+        }
+
+        await runCombo(combos[currentIndex]);
+      }
+    });
+
+    await Promise.all(workers);
   }
 
   return {

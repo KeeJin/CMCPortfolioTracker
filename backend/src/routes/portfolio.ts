@@ -156,6 +156,67 @@ export function calculateTwrFromSeries(series: Array<{ date: string; totalValue:
   return cumulative - 1;
 }
 
+function calculateCumulativeTwrFactorSeries(
+  series: Array<{ date: string; totalValue: number }>,
+  flows: Array<{ date: string; amount: number }>,
+) {
+  if (series.length === 0) {
+    return [] as number[];
+  }
+
+  const factors = [1];
+  let cumulative = 1;
+
+  for (let index = 1; index < series.length; index += 1) {
+    const previous = series[index - 1];
+    const current = series[index];
+
+    const flow = flows
+      .filter((entry) => entry.date > previous.date && entry.date <= current.date)
+      .reduce((sum, entry) => sum + entry.amount, 0);
+
+    const adjustedStart = previous.totalValue + flow;
+    const periodReturn = adjustedStart === 0 ? 0 : (current.totalValue - adjustedStart) / adjustedStart;
+    cumulative *= 1 + periodReturn;
+    factors.push(cumulative);
+  }
+
+  return factors;
+}
+
+async function fetchBenchmarkSeriesWithFallback(
+  candidates: string[],
+  sampledDates: string[],
+  startDate: string,
+  effectiveStartDate: string,
+  rangeEnd: string,
+) {
+  const uniqueStarts = [...new Set([startDate, effectiveStartDate])];
+
+  for (const benchmarkCandidate of candidates) {
+    for (const candidateStart of uniqueStarts) {
+      const benchmarkHistory = await fetchYahooFinanceHistoricalPrices([benchmarkCandidate], candidateStart, rangeEnd);
+      const benchmarkPoints = benchmarkHistory.history[benchmarkCandidate] ?? [];
+      if (benchmarkPoints.length === 0) {
+        continue;
+      }
+
+      const normalized = buildNormalizedBenchmarkSeries(sampledDates, benchmarkPoints);
+      if (normalized.length === 0) {
+        continue;
+      }
+
+      return {
+        symbol: benchmarkCandidate,
+        normalized,
+        points: benchmarkPoints,
+      };
+    }
+  }
+
+  return null;
+}
+
 // Modified TWR for active positions only (ignores idle cash):
 // - portfolio value = holdings market value only
 // - BUY amount = external inflow (capital deployed into active positions)
@@ -286,6 +347,85 @@ export function calculateInvestedCapitalTwrFromTradeBoundaries(
     twr: cumulative - 1,
     flows,
   };
+}
+
+function calculateInvestedCapitalTwrFactorSeriesFromTradeBoundaries(
+  rangeDates: string[],
+  anchorStateBeforeRange: { holdings: Record<string, number>; cash: number },
+  tradeTransactions: Transaction[],
+  priceBySymbolDate: Map<string, Map<string, number>>,
+  fxPoints: PricePoint[],
+) {
+  if (rangeDates.length === 0) {
+    return [] as number[];
+  }
+
+  const state = {
+    holdings: { ...anchorStateBeforeRange.holdings },
+    cash: anchorStateBeforeRange.cash,
+  };
+
+  const tradesByBoundaryDate = new Map<string, Transaction[]>();
+  for (const tx of tradeTransactions) {
+    const boundary = assignTradeToBoundaryDate(tx.date, rangeDates);
+    if (!boundary) continue;
+
+    const current = tradesByBoundaryDate.get(boundary) ?? [];
+    current.push(tx);
+    tradesByBoundaryDate.set(boundary, current);
+  }
+
+  for (const [date, trades] of tradesByBoundaryDate) {
+    tradesByBoundaryDate.set(date, [...trades].sort((a, b) => a.id.localeCompare(b.id)));
+  }
+
+  const factors: number[] = [1];
+  let cumulative = 1;
+  let baseline = getHoldingsValueOnDate(state.holdings, rangeDates[0], priceBySymbolDate);
+  let lastTradeBoundaryDate: string | null = null;
+
+  for (let index = 1; index < rangeDates.length; index += 1) {
+    const date = rangeDates[index];
+    const trades = tradesByBoundaryDate.get(date) ?? [];
+
+    if (trades.length > 0) {
+      const endingBeforeTrades = getHoldingsValueOnDate(state.holdings, date, priceBySymbolDate);
+      if (baseline !== 0) {
+        const periodReturn = (endingBeforeTrades - baseline) / baseline;
+        cumulative *= 1 + periodReturn;
+      }
+
+      let boundaryFlow = 0;
+      for (const tx of trades) {
+        const signedSgd = tx.type === 'BUY' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+        const signedUsd = convertSgdToUsd(signedSgd, tx.date, fxPoints);
+        boundaryFlow += signedUsd;
+        applyTransaction(state, tx);
+      }
+      lastTradeBoundaryDate = date;
+      baseline = endingBeforeTrades + boundaryFlow;
+      factors.push(cumulative);
+      continue;
+    }
+
+    const isFinalDate = index === rangeDates.length - 1;
+    const shouldApplyFinalPostTradeReturn = isFinalDate
+      && (!lastTradeBoundaryDate || date > lastTradeBoundaryDate);
+
+    if (shouldApplyFinalPostTradeReturn) {
+      const finalValue = getHoldingsValueOnDate(state.holdings, date, priceBySymbolDate);
+      if (baseline !== 0) {
+        const finalPeriodReturn = (finalValue - baseline) / baseline;
+        cumulative *= 1 + finalPeriodReturn;
+      }
+      factors.push(cumulative);
+      continue;
+    }
+
+    factors.push(cumulative);
+  }
+
+  return factors;
 }
 
 export function buildUsdPortfolioPoint(
@@ -573,7 +713,26 @@ export function computeRealizedGainsForRange(
   const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
 
   for (const tx of sorted) {
-    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+    if (!tx.symbol) {
+      continue;
+    }
+
+    if (tx.type === 'SPLIT') {
+      const ratio = Number(tx.splitRatio ?? 0);
+      if (!Number.isFinite(ratio) || ratio <= 0) {
+        continue;
+      }
+      const basis = costBasisBySymbol.get(tx.symbol);
+      if (!basis || basis.quantity <= 0) {
+        continue;
+      }
+
+      basis.quantity *= ratio;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.quantity || tx.quantity <= 0) {
       continue;
     }
 
@@ -620,7 +779,26 @@ function buildAverageCostBasisBySymbol(
   const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
 
   for (const tx of sorted) {
-    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+    if (!tx.symbol) {
+      continue;
+    }
+
+    if (tx.type === 'SPLIT') {
+      const ratio = Number(tx.splitRatio ?? 0);
+      if (!Number.isFinite(ratio) || ratio <= 0) {
+        continue;
+      }
+      const basis = costBasisBySymbol.get(tx.symbol);
+      if (!basis || basis.quantity <= 0) {
+        continue;
+      }
+
+      basis.quantity *= ratio;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.quantity || tx.quantity <= 0) {
       continue;
     }
 
@@ -1192,8 +1370,27 @@ export async function buildPortfolioValueResponse({
   );
   const twrSymbolContributionTotal = Object.values(twrSymbolContributions).reduce((sum, value) => sum + value, 0);
   const twrResidualBreakdown = computeTwrResidualBreakdown(attributionSeries, attributionFlows, twrSymbolContributionTotal);
+  const accountStartValue = series[0]?.totalValue ?? 0;
+  const hasValidAccountStartBase = validTwrMode === 'account_total'
+    ? Number.isFinite(accountStartValue) && accountStartValue > 0
+    : true;
+
+  const displayTwr = hasValidAccountStartBase ? twr : null;
   const years = Math.max((new Date(end).getTime() - new Date(effectiveStartDate).getTime()) / (365.25 * 86400 * 1000), 1 / 12);
-  const cagr = (1 + twr) ** (1 / years) - 1;
+  const cagr = displayTwr === null ? null : (1 + displayTwr) ** (1 / years) - 1;
+
+  const displayTwrSeries = validTwrMode === 'account_total'
+    ? calculateCumulativeTwrFactorSeries(
+      attributionSeries.map((entry) => ({ date: entry.date, totalValue: entry.totalValue })),
+      attributionFlows,
+    )
+    : calculateInvestedCapitalTwrFactorSeriesFromTradeBoundaries(
+      rangeDates,
+      preRangeState,
+      investedCapitalTradeTransactions,
+      priceBySymbolDate,
+      fxPoints,
+    );
 
   let benchmarkTwrSeries = series.map(() => 1);
   let benchmarkReturn = 0;
@@ -1203,28 +1400,23 @@ export async function buildPortfolioValueResponse({
 
   const sampledDatesForBenchmark = series.map((entry) => entry.date);
   const benchmarkCandidates = ['^GSPC', 'VOO'];
-  for (const benchmarkCandidate of benchmarkCandidates) {
-    const benchmarkHistory = await fetchYahooFinanceHistoricalPrices([benchmarkCandidate], startDate, rangeEnd);
-    const benchmarkPoints = benchmarkHistory.history[benchmarkCandidate] ?? [];
-    if (benchmarkPoints.length === 0) {
-      continue;
-    }
-
-    const normalized = buildNormalizedBenchmarkSeries(sampledDatesForBenchmark, benchmarkPoints);
-    if (normalized.length === 0) {
-      continue;
-    }
-
-    benchmarkTwrSeries = normalized;
-    benchmarkSymbol = benchmarkCandidate;
-    const first = normalized[0] ?? 1;
-    const last = normalized[normalized.length - 1] ?? first;
+  const benchmarkResult = await fetchBenchmarkSeriesWithFallback(
+    benchmarkCandidates,
+    sampledDatesForBenchmark,
+    startDate,
+    effectiveStartDate,
+    rangeEnd,
+  );
+  if (benchmarkResult) {
+    benchmarkTwrSeries = benchmarkResult.normalized;
+    benchmarkSymbol = benchmarkResult.symbol;
+    const first = benchmarkResult.normalized[0] ?? 1;
+    const last = benchmarkResult.normalized[benchmarkResult.normalized.length - 1] ?? first;
     benchmarkReturn = first === 0 ? 0 : last / first - 1;
     benchmarkCagr = (1 + benchmarkReturn) ** (1 / years) - 1;
     benchmarkVolatility = calculateAnnualizedVolatilityFromPriceSeries(
-      benchmarkPoints.filter((point) => point.date >= effectiveStartDate && point.date <= end),
+      benchmarkResult.points.filter((point) => point.date >= effectiveStartDate && point.date <= end),
     );
-    break;
   }
 
   const latestState = reconstructState(anchor.baseline, txs);
@@ -1291,15 +1483,15 @@ export async function buildPortfolioValueResponse({
     // Flow-adjusted gain/loss helps explain performance independent of user cash movements.
     totalGainLoss: (endValue - startValue) - netExternalFlow,
     netExternalFlow,
-    twr,
+    twr: displayTwr ?? undefined,
     twrMode: validTwrMode,
     accountTwr,
     investedCapitalTwr,
-    cagr,
+    cagr: cagr ?? undefined,
     pricingMethod,
     timeframe: validTimeframe,
     series,
-    twrSeries: series.map((entry) => entry.totalValue / series[0].totalValue),
+    twrSeries: displayTwrSeries,
     benchmarkTwrSeries,
     benchmarkReturn,
     benchmarkCagr,
