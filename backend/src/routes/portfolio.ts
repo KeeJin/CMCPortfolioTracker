@@ -15,11 +15,14 @@ import {
 import { collectTrackedSymbols, mergeMarketSplitTransactions } from '../marketSplits.js';
 import { getCachedPricesForSymbol } from '../priceCache.js';
 import { convertSgdToUsd, fetchUsdSgdHistory } from '../fx.js';
-import type { Transaction } from '../parsers.js';
+import type { Baseline, Transaction, Upload } from '../parsers.js';
 import type { PricePoint } from '../pricing.js';
 import { buildManualLinearOptionSeries } from '../manualOptionValuation.js';
 
 const router = Router();
+
+export const PORTFOLIO_TIMEFRAMES = ['5d', '1m', '3m', '6m', 'ytd', '1y', '3y', '5y', 'all'] as const;
+export const PORTFOLIO_TWR_MODES = ['invested_capital', 'account_total'] as const;
 
 export function getDateRangeForTimeframe(timeframe: string, referenceDate: Date = new Date()) {
   const end = new Date(referenceDate);
@@ -801,20 +804,38 @@ router.get('/history', async (_req, res) => {
   });
 });
 
-router.get('/value', async (req: Request, res: Response) => {
-  const prepared = await readSupabaseDocument<Record<string, unknown>>('portfolio_value');
-  if (prepared) {
-    res.json(prepared);
-    return;
-  }
+type BuildPortfolioValueResponseParams = {
+  timeframe: string;
+  pricingMethod: string;
+  twrMode: string;
+  includeDebug: boolean;
+  baselines?: Baseline[];
+  transactions?: Transaction[];
+  uploads?: Upload[];
+};
 
-  const timeframe = String(req.query.timeframe ?? '1y');
-  const pricingMethod = String(req.query.pricingMethod ?? 'yahoo_finance');
-  const twrMode = String(req.query.twrMode ?? 'invested_capital');
-  const includeDebug = String(req.query.debug ?? '0') === '1';
-  const baselines = getAllBaselines();
-  const transactions = normalizeBankTransferPairsForAnalytics(sanitizeTransactionsForAnalytics(getAllTransactions()));
-  const anchor = getPortfolioAnchor(baselines, transactions);
+export async function buildPortfolioValueResponse({
+  timeframe,
+  pricingMethod,
+  twrMode,
+  includeDebug,
+  baselines,
+  transactions,
+  uploads,
+}: BuildPortfolioValueResponseParams) {
+  const resolvedBaselines = baselines ?? getAllBaselines();
+  const resolvedTransactions = normalizeBankTransferPairsForAnalytics(
+    sanitizeTransactionsForAnalytics(transactions ?? getAllTransactions()),
+  );
+
+  const validTimeframe = PORTFOLIO_TIMEFRAMES.includes(timeframe as (typeof PORTFOLIO_TIMEFRAMES)[number])
+    ? timeframe
+    : '1y';
+  const validTwrMode = PORTFOLIO_TWR_MODES.includes(twrMode as (typeof PORTFOLIO_TWR_MODES)[number])
+    ? twrMode
+    : 'invested_capital';
+
+  const anchor = getPortfolioAnchor(resolvedBaselines, resolvedTransactions);
   const trackedSymbols = collectTrackedSymbols(anchor.baseline, anchor.transactionsToApply);
   const splitStart = anchor.baseline?.date ?? (anchor.transactionsToApply[0]?.date ?? '1970-01-01');
   const splitEnd = new Date().toISOString().slice(0, 10);
@@ -823,9 +844,9 @@ router.get('/value', async (req: Request, res: Response) => {
   const txs = sortTransactions(expandManualLinearOptionTransactions(splitEnriched));
   const liveUsdSgdRate = (await fetchYahooFinanceLatestPrices(['USDSGD=X'])).livePrices['USDSGD=X'] ?? null;
 
-  const startDate = baselines.length ? baselines[0].date : '1970-01-01';
+  const startDate = resolvedBaselines.length ? resolvedBaselines[0].date : '1970-01-01';
   const rangeEnd = new Date().toISOString().slice(0, 10);
-  const range = getDateRangeForTimeframe(timeframe);
+  const range = getDateRangeForTimeframe(validTimeframe);
   const start = range.start;
   const end = range.end;
 
@@ -861,6 +882,10 @@ router.get('/value', async (req: Request, res: Response) => {
     }
   }
 
+  const missingPriceSymbols = symbols
+    .filter((symbol) => (priceSeries[symbol]?.length ?? 0) === 0)
+    .sort((a, b) => a.localeCompare(b));
+
   const dates = new Set<string>();
   for (const points of Object.values(priceSeries)) {
     for (const point of points) {
@@ -888,14 +913,14 @@ router.get('/value', async (req: Request, res: Response) => {
     fullSeries.push(buildUsdPortfolioPoint(date, holdingsValue, state.cash, fxPoints));
   }
 
-  const samplingStep = getSamplingStepForTimeframe(timeframe);
+  const samplingStep = getSamplingStepForTimeframe(validTimeframe);
   const sampledDates = rangeDates.filter((_, index) => index % samplingStep === 0 || index === rangeDates.length - 1);
   const series = fullSeries.filter((entry) => sampledDates.includes(entry.date));
   const startDateFiltered = sampledDates.find((date) => date >= start) ?? sampledDates[0] ?? range.start;
 
   if (series.length === 0) {
     const fallback = [{ date: rangeEnd, totalValue: 0, holdingsValue: 0, cash: 0 }];
-    res.json({
+    return {
       date: rangeEnd,
       holdingsValue: 0,
       totalValue: 0,
@@ -906,7 +931,7 @@ router.get('/value', async (req: Request, res: Response) => {
       twr: 0,
       cagr: 0,
       pricingMethod,
-      timeframe,
+      timeframe: validTimeframe,
       series: fallback,
       twrSeries: [1],
       benchmarkTwrSeries: [1],
@@ -918,10 +943,12 @@ router.get('/value', async (req: Request, res: Response) => {
       positionContributions: {},
       realizedGains: {},
       usdSgdRate,
-      missingPriceSymbols: [],
-      livePriceFetch: { fetchedSymbols: [], failedSymbols: [] },
-    });
-    return;
+      missingPriceSymbols,
+      livePriceFetch: {
+        fetchedSymbols: rawHistory.fetchedSymbols,
+        failedSymbols: rawHistory.failedSymbols,
+      },
+    };
   }
 
   const effectiveStartDate = series[0].date;
@@ -958,21 +985,21 @@ router.get('/value', async (req: Request, res: Response) => {
   const investedCapitalTwr = investedCapitalResult.twr;
   const investedCapitalFlows = investedCapitalResult.flows;
 
-  const twr = twrMode === 'account_total' ? accountTwr : investedCapitalTwr;
-  const twrWithoutExternalFlows = twrMode === 'account_total'
+  const twr = validTwrMode === 'account_total' ? accountTwr : investedCapitalTwr;
+  const twrWithoutExternalFlows = validTwrMode === 'account_total'
     ? accountTwrWithoutExternalFlows
     : calculateInvestedCapitalTwr(
       fullSeries.map((entry) => ({ date: entry.date, holdingsValue: entry.holdingsValue })),
       [],
     );
-  const attributionSeries = twrMode === 'account_total'
+  const attributionSeries = validTwrMode === 'account_total'
     ? fullSeries
     : fullSeries.map((entry) => ({
       ...entry,
       totalValue: entry.holdingsValue,
       cash: 0,
     }));
-  const attributionFlows = twrMode === 'account_total' ? externalFlows : investedCapitalFlows;
+  const attributionFlows = validTwrMode === 'account_total' ? externalFlows : investedCapitalFlows;
 
   const { symbolContributions: twrSymbolContributions, residualContribution } = computeTwrSymbolContributions(
     symbols,
@@ -1056,12 +1083,12 @@ router.get('/value', async (req: Request, res: Response) => {
     totalGainLoss: (endValue - startValue) - netExternalFlow,
     netExternalFlow,
     twr,
-    twrMode,
+    twrMode: validTwrMode,
     accountTwr,
     investedCapitalTwr,
     cagr,
     pricingMethod,
-    timeframe,
+    timeframe: validTimeframe,
     series,
     twrSeries: series.map((entry) => entry.totalValue / series[0].totalValue),
     benchmarkTwrSeries,
@@ -1076,13 +1103,17 @@ router.get('/value', async (req: Request, res: Response) => {
     twrResidualBreakdown,
     realizedGains,
     usdSgdRate,
-    missingPriceSymbols: [],
-    livePriceFetch: null,
+    missingPriceSymbols,
+    livePriceFetch: {
+      fetchedSymbols: rawHistory.fetchedSymbols,
+      failedSymbols: rawHistory.failedSymbols,
+    },
     lastPriceSyncAt: lastLivePriceSyncAt,
   };
 
   if (includeDebug) {
-    const transactionUploads = getAllUploads().filter((upload) => upload.type === 'TRANSACTIONS');
+    const allUploads = uploads ?? getAllUploads();
+    const transactionUploads = allUploads.filter((upload) => upload.type === 'TRANSACTIONS');
     const parserRowsConsidered = transactionUploads.reduce((sum, upload) => {
       const value = Number(upload.metadata?.rowsConsidered ?? 0);
       return sum + (Number.isFinite(value) ? value : 0);
@@ -1097,7 +1128,7 @@ router.get('/value', async (req: Request, res: Response) => {
     }, 0);
 
     response.debug = {
-      timeframe,
+      timeframe: validTimeframe,
       pricePointCount: fullSeries.length,
       sampledPointCount: series.length,
       twrWithoutExternalFlows,
@@ -1115,7 +1146,34 @@ router.get('/value', async (req: Request, res: Response) => {
     };
   }
 
-  res.json(response);
+  return response;
+}
+
+router.get('/value', async (req: Request, res: Response) => {
+  const timeframe = String(req.query.timeframe ?? '1y');
+  const pricingMethod = String(req.query.pricingMethod ?? 'yahoo_finance');
+  const twrMode = String(req.query.twrMode ?? 'invested_capital');
+  const includeDebug = String(req.query.debug ?? '0') === '1';
+
+  const prepared = await readSupabaseDocument<Record<string, any>>('portfolio_value');
+  const preparedSlice = prepared?.byTimeframe?.[timeframe]?.[twrMode];
+  if (preparedSlice && !includeDebug) {
+    res.json(preparedSlice);
+    return;
+  }
+
+  if (prepared && !prepared.byTimeframe && !includeDebug) {
+    res.json(prepared);
+    return;
+  }
+
+  const computed = await buildPortfolioValueResponse({
+    timeframe,
+    pricingMethod,
+    twrMode,
+    includeDebug,
+  });
+  res.json(computed);
 });
 
 export default router;

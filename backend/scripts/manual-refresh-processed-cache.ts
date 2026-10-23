@@ -7,6 +7,9 @@ import { reconstructState, sortTransactions } from '../src/reconstruction.js';
 import { collectTrackedSymbols, mergeMarketSplitTransactions } from '../src/marketSplits.js';
 import { fetchYahooFinanceStockSplits } from '../src/pricing.js';
 import {
+  buildPortfolioValueResponse,
+  PORTFOLIO_TIMEFRAMES,
+  PORTFOLIO_TWR_MODES,
   normalizeBankTransferPairsForAnalytics,
   sanitizeTransactionsForAnalytics,
 } from '../src/routes/portfolio.js';
@@ -45,6 +48,64 @@ function logInfo(message: string, details?: Record<string, unknown>) {
     return;
   }
   console.log(`[manual-refresh] ${message}`);
+}
+
+function logCoverageReport(valuePayload: { byTimeframe?: Record<string, Record<string, any>> }) {
+  const byTimeframe = valuePayload.byTimeframe ?? {};
+  const entries: Array<{
+    timeframe: string;
+    twrMode: string;
+    missingSymbols: string[];
+    failedSymbols: string[];
+  }> = [];
+
+  for (const [timeframe, byMode] of Object.entries(byTimeframe)) {
+    for (const [twrMode, payload] of Object.entries(byMode ?? {})) {
+      const missingSymbols = Array.isArray(payload?.missingPriceSymbols)
+        ? payload.missingPriceSymbols.filter((symbol: unknown): symbol is string => typeof symbol === 'string')
+        : [];
+      const failedSymbols = Array.isArray(payload?.livePriceFetch?.failedSymbols)
+        ? payload.livePriceFetch.failedSymbols.filter((symbol: unknown): symbol is string => typeof symbol === 'string')
+        : [];
+
+      entries.push({ timeframe, twrMode, missingSymbols, failedSymbols });
+    }
+  }
+
+  const combosWithMissing = entries.filter((entry) => entry.missingSymbols.length > 0 || entry.failedSymbols.length > 0);
+  if (combosWithMissing.length === 0) {
+    logInfo('Coverage report', {
+      combinationsChecked: entries.length,
+      combinationsWithGaps: 0,
+      status: 'all combinations have full symbol price coverage',
+    });
+    return;
+  }
+
+  const allMissing = new Set<string>();
+  const allFailed = new Set<string>();
+  for (const entry of combosWithMissing) {
+    for (const symbol of entry.missingSymbols) allMissing.add(symbol);
+    for (const symbol of entry.failedSymbols) allFailed.add(symbol);
+  }
+
+  logInfo('Coverage report summary', {
+    combinationsChecked: entries.length,
+    combinationsWithGaps: combosWithMissing.length,
+    uniqueMissingSymbols: [...allMissing].sort((a, b) => a.localeCompare(b)),
+    uniqueYahooFailedSymbols: [...allFailed].sort((a, b) => a.localeCompare(b)),
+  });
+
+  for (const entry of combosWithMissing) {
+    logInfo('Coverage gap detail', {
+      timeframe: entry.timeframe,
+      twrMode: entry.twrMode,
+      missingCount: entry.missingSymbols.length,
+      failedFetchCount: entry.failedSymbols.length,
+      missingSymbols: entry.missingSymbols,
+      failedSymbols: entry.failedSymbols,
+    });
+  }
 }
 
 async function readSupabaseDocument<T>(key: string): Promise<T | null> {
@@ -176,58 +237,38 @@ function buildPortfolioHistory(baselines: Baseline[], uploads: Upload[], transac
   };
 }
 
-function buildPortfolioValue(baselines: Baseline[], transactions: Transaction[]) {
-  const cleaned = normalizeBankTransferPairsForAnalytics(sanitizeTransactionsForAnalytics(transactions));
-  const anchor = getPortfolioAnchor(baselines, cleaned);
-  const state = reconstructState(anchor.baseline, sortTransactions(anchor.transactionsToApply));
-  const now = new Date().toISOString().slice(0, 10);
-  const totalValue = state.cash;
+async function buildPortfolioValue(baselines: Baseline[], transactions: Transaction[], uploads: Upload[]) {
+  const pricingMethod = 'yahoo_finance';
+  const byTimeframe: Record<string, Record<string, unknown>> = {};
+
+  for (const timeframe of PORTFOLIO_TIMEFRAMES) {
+    byTimeframe[timeframe] = {};
+
+    for (const twrMode of PORTFOLIO_TWR_MODES) {
+      logInfo('Precomputing portfolio value payload', {
+        timeframe,
+        twrMode,
+        pricingMethod,
+      });
+
+      const payload = await buildPortfolioValueResponse({
+        timeframe,
+        pricingMethod,
+        twrMode,
+        includeDebug: false,
+        baselines,
+        transactions,
+        uploads,
+      });
+
+      byTimeframe[timeframe][twrMode] = payload;
+    }
+  }
 
   return {
-    date: now,
-    holdingsValue: 0,
-    totalValue,
-    startDate: now,
-    endDate: now,
-    totalReturn: 0,
-    netExternalFlow: 0,
-    twr: 0,
-    twrMode: 'invested_capital',
-    accountTwr: 0,
-    investedCapitalTwr: 0,
-    pricingMethod: 'manual_refresh',
-    timeframe: '1y',
-    series: [
-      {
-        date: now,
-        totalValue,
-        holdingsValue: 0,
-        cashValue: state.cash,
-      },
-    ],
-    positionValues: Object.fromEntries(
-      Object.entries(state.holdings).map(([symbol, quantity]) => [symbol, quantity * 0]),
-    ),
-    positionContributions: Object.fromEntries(
-      Object.entries(state.holdings).map(([symbol]) => [symbol, 0]),
-    ),
-    realizedGains: Object.fromEntries(
-      Object.entries(state.holdings).map(([symbol]) => [symbol, 0]),
-    ),
-    twrSymbolContributions: Object.fromEntries(
-      Object.entries(state.holdings).map(([symbol]) => [symbol, 0]),
-    ),
-    twrUnattributedContribution: 0,
-    twrResidualBreakdown: {
-      symbolContributionTotal: 0,
-      cashCarryContribution: 0,
-      tradeTimingContribution: 0,
-      residualRemainder: 0,
-    },
-    usdSgdRate: null,
-    missingPriceSymbols: [],
-    livePriceFetch: null,
-    lastPriceSyncAt: null,
+    generatedAt: new Date().toISOString(),
+    pricingMethod,
+    byTimeframe,
   };
 }
 
@@ -252,7 +293,8 @@ async function main() {
 
   const snapshot = await buildPortfolioSnapshot(baselines, transactions);
   const history = buildPortfolioHistory(baselines, uploads, transactions);
-  const value = buildPortfolioValue(baselines, transactions);
+  const value = await buildPortfolioValue(baselines, transactions, uploads);
+  logCoverageReport(value as { byTimeframe?: Record<string, Record<string, any>> });
 
   const writeTasks: Promise<void>[] = [];
 
