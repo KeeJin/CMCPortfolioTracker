@@ -36,7 +36,7 @@ function readTextFromUpload(file: Express.Multer.File): string {
   }
 }
 
-router.post('/', upload.single('file'), (req, res) => {
+router.post('/', upload.single('file'), async (req, res) => {
   const file = req.file;
   if (!file) {
     res.status(400).json({ error: 'A transactions file is required.' });
@@ -56,8 +56,8 @@ router.post('/', upload.single('file'), (req, res) => {
       return true;
     });
 
-    const persisted = addTransactions(deduped);
-    addUpload({
+    const persisted = await addTransactions(deduped);
+    const uploadResult = await addUpload({
       id: `upload-${Date.now()}`,
       type: 'TRANSACTIONS',
       filename: file.originalname,
@@ -81,6 +81,10 @@ router.post('/', upload.single('file'), (req, res) => {
       parseErrors: result.parseErrors,
       diagnostics: result.diagnostics,
       errors: result.errors,
+      syncStatus: {
+        transactions: persisted.supabaseSync,
+        uploads: uploadResult.supabaseSync,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected transaction parsing failure.';
@@ -88,7 +92,7 @@ router.post('/', upload.single('file'), (req, res) => {
   }
 });
 
-router.post('/manual', (req, res) => {
+router.post('/manual', async (req, res) => {
   const payload = req.body ?? {};
   console.info('[manual-entry] Received submission', {
     date: payload.date,
@@ -151,8 +155,8 @@ router.post('/manual', (req, res) => {
       source: tx.source,
     });
 
-    const result = addTransactions([tx]);
-    addUpload({
+    const result = await addTransactions([tx]);
+    const uploadResult = await addUpload({
       id: `manual-${Date.now()}`,
       type: 'TRANSACTIONS',
       filename: `manual-${tx.symbol ?? 'trade'}.json`,
@@ -168,6 +172,10 @@ router.post('/manual', (req, res) => {
       transaction: tx,
       added: result.added,
       duplicates: result.duplicates,
+      syncStatus: {
+        transactions: result.supabaseSync,
+        uploads: uploadResult.supabaseSync,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected manual transaction failure.';

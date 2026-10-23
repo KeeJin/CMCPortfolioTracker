@@ -74,7 +74,7 @@ async function writeSupabaseDocument<T>(key: StoreDocumentKey, value: T): Promis
     return;
   }
 
-  await fetch(`${SUPABASE_URL}/rest/v1/cache_documents`, {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/cache_documents`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -84,6 +84,67 @@ async function writeSupabaseDocument<T>(key: StoreDocumentKey, value: T): Promis
     },
     body: JSON.stringify({ key, value }),
   });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => 'Unable to read response body');
+    throw new Error(`Supabase write failed for ${key}: ${response.status} ${response.statusText} - ${body}`);
+  }
+}
+
+type SupabaseSyncContext = {
+  operation: 'addBaseline' | 'addTransactions' | 'addUpload';
+  baselineId?: string;
+  baselineDate?: string;
+  transactionAddedCount?: number;
+  transactionInputCount?: number;
+  uploadId?: string;
+  uploadType?: Upload['type'];
+  totalBaselines?: number;
+  totalTransactions?: number;
+  totalUploads?: number;
+};
+
+export type SupabaseSyncResult = {
+  attempted: boolean;
+  success: boolean;
+  error?: string;
+};
+
+async function syncSupabaseDocumentWithLogging<T>(
+  key: StoreDocumentKey,
+  value: T,
+  context: SupabaseSyncContext,
+): Promise<SupabaseSyncResult> {
+  if (!isSupabaseConfigured()) {
+    return {
+      attempted: false,
+      success: false,
+    };
+  }
+
+  try {
+    await writeSupabaseDocument(key, value);
+    console.info('[store] Supabase sync succeeded', {
+      key,
+      ...context,
+    });
+    return {
+      attempted: true,
+      success: true,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown Supabase sync error';
+    console.error('[store] Supabase sync failed', {
+      key,
+      ...context,
+      error: message,
+    });
+    return {
+      attempted: true,
+      success: false,
+      error: message,
+    };
+  }
 }
 
 function writeLocalStoreState() {
@@ -147,21 +208,32 @@ export function getAllUploads(): Upload[] {
   return [...state.uploads].sort((a, b) => a.uploadedAt.localeCompare(b.uploadedAt));
 }
 
-export function addBaseline(baseline: Baseline) {
+export async function addBaseline(baseline: Baseline) {
   const exists = state.baselines.some((item) => item.id === baseline.id);
+  let supabaseSync: SupabaseSyncResult = {
+    attempted: false,
+    success: false,
+  };
+
   if (!exists) {
     state.baselines.push(baseline);
     state.baselines.sort((a, b) => a.date.localeCompare(b.date));
     writeJsonFile(path.join(DATA_DIR, 'baselines.json'), state.baselines);
 
-    if (isSupabaseConfigured()) {
-      void writeSupabaseDocument('baselines', state.baselines);
-    }
+    supabaseSync = await syncSupabaseDocumentWithLogging('baselines', state.baselines, {
+      operation: 'addBaseline',
+      baselineId: baseline.id,
+      baselineDate: baseline.date,
+      totalBaselines: state.baselines.length,
+    });
   }
-  return baseline;
+  return {
+    baseline,
+    supabaseSync,
+  };
 }
 
-export function addTransactions(items: Transaction[]) {
+export async function addTransactions(items: Transaction[]) {
   const seen = new Set(state.transactions.map((tx) => tx.id));
   const newItems = items.filter((item) => !seen.has(item.id));
 
@@ -173,23 +245,33 @@ export function addTransactions(items: Transaction[]) {
   state.transactions.sort((a, b) => a.date.localeCompare(b.date));
   writeJsonFile(path.join(DATA_DIR, 'transactions.json'), state.transactions);
 
-  if (isSupabaseConfigured()) {
-    void writeSupabaseDocument('transactions', state.transactions);
-  }
+  const supabaseSync = await syncSupabaseDocumentWithLogging('transactions', state.transactions, {
+    operation: 'addTransactions',
+    transactionAddedCount: newItems.length,
+    transactionInputCount: items.length,
+    totalTransactions: state.transactions.length,
+  });
 
   return {
     added: newItems.length,
     duplicates: items.length - newItems.length,
+    supabaseSync,
   };
 }
 
-export function addUpload(upload: Upload) {
+export async function addUpload(upload: Upload) {
   state.uploads.unshift(upload);
   writeJsonFile(path.join(DATA_DIR, 'uploads.json'), state.uploads);
 
-  if (isSupabaseConfigured()) {
-    void writeSupabaseDocument('uploads', state.uploads);
-  }
+  const supabaseSync = await syncSupabaseDocumentWithLogging('uploads', state.uploads, {
+    operation: 'addUpload',
+    uploadId: upload.id,
+    uploadType: upload.type,
+    totalUploads: state.uploads.length,
+  });
 
-  return upload;
+  return {
+    upload,
+    supabaseSync,
+  };
 }

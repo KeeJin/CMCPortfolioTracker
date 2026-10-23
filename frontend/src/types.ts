@@ -20,6 +20,19 @@ export type UploadBaselineResponse = {
     status: 'MATCH' | 'MINOR_MISMATCH' | 'MAJOR_MISMATCH'
     notes?: string[]
   }
+  syncStatus?: UploadSyncStatus
+}
+
+export type SyncStatusResult = {
+  attempted: boolean
+  success: boolean
+  error?: string
+}
+
+export type UploadSyncStatus = {
+  baselines?: SyncStatusResult
+  transactions?: SyncStatusResult
+  uploads?: SyncStatusResult
 }
 
 export type UploadTransactionsResponse = {
@@ -38,6 +51,7 @@ export type UploadTransactionsResponse = {
     row: unknown
     reason: string
   }>
+  syncStatus?: UploadSyncStatus
 }
 
 export type ManualTradeRequest = {
@@ -76,6 +90,7 @@ export type ManualTradeResponse = {
   }
   added: number
   duplicates: number
+  syncStatus?: UploadSyncStatus
 }
 
 export type PortfolioResponse = {
