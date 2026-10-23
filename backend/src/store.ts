@@ -74,7 +74,7 @@ async function writeSupabaseDocument<T>(key: StoreDocumentKey, value: T): Promis
     return;
   }
 
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/cache_documents`, {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/cache_documents?on_conflict=key`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
