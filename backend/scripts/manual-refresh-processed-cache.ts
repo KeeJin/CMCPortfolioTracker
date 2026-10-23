@@ -10,6 +10,7 @@ import {
   buildPortfolioValueResponse,
   PORTFOLIO_TIMEFRAMES,
   PORTFOLIO_TWR_MODES,
+  expandManualLinearOptionTransactions,
   normalizeBankTransferPairsForAnalytics,
   sanitizeTransactionsForAnalytics,
 } from '../src/routes/portfolio.js';
@@ -203,14 +204,15 @@ async function buildPortfolioSnapshot(baselines: Baseline[], transactions: Trans
     console.warn('[manual-refresh] Stock split refresh failed, using raw transaction stream:', error);
   }
 
-  const reconstructed = reconstructState(anchor.baseline, sortTransactions(effectiveTransactions));
+  const expandedTransactions = sortTransactions(expandManualLinearOptionTransactions(effectiveTransactions));
+  const reconstructed = reconstructState(anchor.baseline, expandedTransactions);
 
   return {
     anchorType: anchor.anchorType,
     baselineDate: anchor.baselineDate ?? null,
     baselinesStored: baselines.length,
     transactionsStored: cleaned.length,
-    transactionsApplied: effectiveTransactions.length,
+    transactionsApplied: expandedTransactions.length,
     state: {
       date: new Date().toISOString().slice(0, 10),
       holdings: reconstructed.holdings,
