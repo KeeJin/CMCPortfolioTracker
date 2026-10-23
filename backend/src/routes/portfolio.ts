@@ -410,8 +410,7 @@ function calculateInvestedCapitalTwrFactorSeriesFromTradeBoundaries(
 
     const isFinalDate = index === rangeDates.length - 1;
     const shouldApplyFinalPostTradeReturn = isFinalDate
-      && lastTradeBoundaryDate !== null
-      && date > lastTradeBoundaryDate;
+      && (!lastTradeBoundaryDate || date > lastTradeBoundaryDate);
 
     if (shouldApplyFinalPostTradeReturn) {
       const finalValue = getHoldingsValueOnDate(state.holdings, date, priceBySymbolDate);
