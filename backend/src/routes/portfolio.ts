@@ -608,8 +608,15 @@ function buildAverageCostBasisBySymbol(
   transactions: Transaction[],
   endDate: string,
   fxPoints: PricePoint[],
+  initialLots: Map<string, { quantity: number; totalCostUsd: number }> = new Map(),
 ) {
   const costBasisBySymbol = new Map<string, { quantity: number; totalCostUsd: number }>();
+  for (const [symbol, lot] of initialLots) {
+    costBasisBySymbol.set(symbol, {
+      quantity: lot.quantity,
+      totalCostUsd: lot.totalCostUsd,
+    });
+  }
   const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
 
   for (const tx of sorted) {
@@ -636,6 +643,83 @@ function buildAverageCostBasisBySymbol(
   }
 
   return costBasisBySymbol;
+}
+
+// Build baseline opening lots for contribution/cost-basis math:
+// 1) start from baseline quantities (authoritative)
+// 2) infer per-symbol average cost from any pre-baseline BUY/SELL history
+// 3) keep fallback assumption when no older history exists
+function buildInitialLotsFromBaselineAndPreBaselineTransactions(
+  baseline: Baseline | null,
+  preBaselineTransactions: Transaction[],
+  fxPoints: PricePoint[],
+) {
+  const initialLots = new Map<string, { quantity: number; totalCostUsd: number }>();
+
+  if (!baseline) {
+    return initialLots;
+  }
+
+  for (const [symbol, quantityRaw] of Object.entries(baseline.holdings)) {
+    const quantity = Number(quantityRaw);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      continue;
+    }
+
+    const baselinePrice = Number(baseline.holdingPrices?.[symbol]);
+    if (Number.isFinite(baselinePrice) && baselinePrice > 0) {
+      initialLots.set(symbol, {
+        quantity,
+        totalCostUsd: quantity * baselinePrice,
+      });
+      continue;
+    }
+
+    initialLots.set(symbol, {
+      quantity,
+      totalCostUsd: 0,
+    });
+  }
+
+  if (preBaselineTransactions.length === 0) {
+    return initialLots;
+  }
+
+  const inferredPreBaselineLots = buildAverageCostBasisBySymbol(
+    preBaselineTransactions,
+    baseline.date,
+    fxPoints,
+    new Map(),
+  );
+
+  for (const [symbol, lot] of initialLots) {
+    const inferredLot = inferredPreBaselineLots.get(symbol);
+    const baselinePrice = Number(baseline.holdingPrices?.[symbol]);
+
+    if (!inferredLot || inferredLot.quantity <= 0) {
+      if (Number.isFinite(baselinePrice) && baselinePrice > 0) {
+        lot.totalCostUsd = lot.quantity * baselinePrice;
+      }
+      initialLots.set(symbol, lot);
+      continue;
+    }
+
+    const inferredAvg = inferredLot.totalCostUsd / inferredLot.quantity;
+    const hasInferredAvg = Number.isFinite(inferredAvg) && inferredAvg > 0;
+    const knownQuantity = Math.min(lot.quantity, inferredLot.quantity);
+    const unknownQuantity = Math.max(0, lot.quantity - knownQuantity);
+
+    const knownCostUsd = hasInferredAvg ? knownQuantity * inferredAvg : 0;
+    const assumedUnknownPrice = Number.isFinite(baselinePrice) && baselinePrice > 0
+      ? baselinePrice
+      : (hasInferredAvg ? inferredAvg : 0);
+    const unknownCostUsd = unknownQuantity * assumedUnknownPrice;
+
+    lot.totalCostUsd = knownCostUsd + unknownCostUsd;
+    initialLots.set(symbol, lot);
+  }
+
+  return initialLots;
 }
 
 function getLastPriceOnOrBefore(points: Array<{ date: string; price: number }>, date: string): number | null {
@@ -1096,9 +1180,17 @@ export async function buildPortfolioValueResponse({
   }
 
   const latestState = reconstructState(anchor.baseline, txs);
+  const preBaselineTransactions = anchor.baseline
+    ? resolvedTransactions.filter((tx) => tx.date < anchor.baseline!.date)
+    : [];
+  const initialLots = buildInitialLotsFromBaselineAndPreBaselineTransactions(
+    anchor.baseline,
+    preBaselineTransactions,
+    fxPoints,
+  );
   const realizedGains = computeRealizedGainsForRange(txs, effectiveStartDate, end, fxPoints);
-  const costBasisAtStart = buildAverageCostBasisBySymbol(txs, effectiveStartDate, fxPoints);
-  const costBasisAtEnd = buildAverageCostBasisBySymbol(txs, end, fxPoints);
+  const costBasisAtStart = buildAverageCostBasisBySymbol(txs, effectiveStartDate, fxPoints, initialLots);
+  const costBasisAtEnd = buildAverageCostBasisBySymbol(txs, end, fxPoints, initialLots);
   const positionValues: Record<string, number> = {};
   const positionContributions: Record<string, number> = {};
 
