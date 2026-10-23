@@ -349,6 +349,85 @@ export function calculateInvestedCapitalTwrFromTradeBoundaries(
   };
 }
 
+function calculateInvestedCapitalTwrFactorSeriesFromTradeBoundaries(
+  rangeDates: string[],
+  anchorStateBeforeRange: { holdings: Record<string, number>; cash: number },
+  tradeTransactions: Transaction[],
+  priceBySymbolDate: Map<string, Map<string, number>>,
+  fxPoints: PricePoint[],
+) {
+  if (rangeDates.length === 0) {
+    return [] as number[];
+  }
+
+  const state = {
+    holdings: { ...anchorStateBeforeRange.holdings },
+    cash: anchorStateBeforeRange.cash,
+  };
+
+  const tradesByBoundaryDate = new Map<string, Transaction[]>();
+  for (const tx of tradeTransactions) {
+    const boundary = assignTradeToBoundaryDate(tx.date, rangeDates);
+    if (!boundary) continue;
+
+    const current = tradesByBoundaryDate.get(boundary) ?? [];
+    current.push(tx);
+    tradesByBoundaryDate.set(boundary, current);
+  }
+
+  for (const [date, trades] of tradesByBoundaryDate) {
+    tradesByBoundaryDate.set(date, [...trades].sort((a, b) => a.id.localeCompare(b.id)));
+  }
+
+  const factors: number[] = [1];
+  let cumulative = 1;
+  let baseline = getHoldingsValueOnDate(state.holdings, rangeDates[0], priceBySymbolDate);
+  let lastTradeBoundaryDate: string | null = null;
+
+  for (let index = 1; index < rangeDates.length; index += 1) {
+    const date = rangeDates[index];
+    const trades = tradesByBoundaryDate.get(date) ?? [];
+
+    if (trades.length > 0) {
+      const endingBeforeTrades = getHoldingsValueOnDate(state.holdings, date, priceBySymbolDate);
+      if (baseline !== 0) {
+        const periodReturn = (endingBeforeTrades - baseline) / baseline;
+        cumulative *= 1 + periodReturn;
+      }
+
+      let boundaryFlow = 0;
+      for (const tx of trades) {
+        const signedSgd = tx.type === 'BUY' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+        const signedUsd = convertSgdToUsd(signedSgd, tx.date, fxPoints);
+        boundaryFlow += signedUsd;
+        applyTransaction(state, tx);
+      }
+      lastTradeBoundaryDate = date;
+      baseline = endingBeforeTrades + boundaryFlow;
+      factors.push(cumulative);
+      continue;
+    }
+
+    const isFinalDate = index === rangeDates.length - 1;
+    const shouldApplyFinalPostTradeReturn = isFinalDate
+      && (!lastTradeBoundaryDate || date > lastTradeBoundaryDate);
+
+    if (shouldApplyFinalPostTradeReturn) {
+      const finalValue = getHoldingsValueOnDate(state.holdings, date, priceBySymbolDate);
+      if (baseline !== 0) {
+        const finalPeriodReturn = (finalValue - baseline) / baseline;
+        cumulative *= 1 + finalPeriodReturn;
+      }
+      factors.push(cumulative);
+      continue;
+    }
+
+    factors.push(cumulative);
+  }
+
+  return factors;
+}
+
 export function buildUsdPortfolioPoint(
   date: string,
   holdingsValueUsd: number,
@@ -634,7 +713,26 @@ export function computeRealizedGainsForRange(
   const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
 
   for (const tx of sorted) {
-    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+    if (!tx.symbol) {
+      continue;
+    }
+
+    if (tx.type === 'SPLIT') {
+      const ratio = Number(tx.splitRatio ?? 0);
+      if (!Number.isFinite(ratio) || ratio <= 0) {
+        continue;
+      }
+      const basis = costBasisBySymbol.get(tx.symbol);
+      if (!basis || basis.quantity <= 0) {
+        continue;
+      }
+
+      basis.quantity *= ratio;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.quantity || tx.quantity <= 0) {
       continue;
     }
 
@@ -681,7 +779,26 @@ function buildAverageCostBasisBySymbol(
   const sorted = sortTransactions(transactions).filter((tx) => tx.date <= endDate);
 
   for (const tx of sorted) {
-    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.symbol || !tx.quantity || tx.quantity <= 0) {
+    if (!tx.symbol) {
+      continue;
+    }
+
+    if (tx.type === 'SPLIT') {
+      const ratio = Number(tx.splitRatio ?? 0);
+      if (!Number.isFinite(ratio) || ratio <= 0) {
+        continue;
+      }
+      const basis = costBasisBySymbol.get(tx.symbol);
+      if (!basis || basis.quantity <= 0) {
+        continue;
+      }
+
+      basis.quantity *= ratio;
+      costBasisBySymbol.set(tx.symbol, basis);
+      continue;
+    }
+
+    if ((tx.type !== 'BUY' && tx.type !== 'SELL') || !tx.quantity || tx.quantity <= 0) {
       continue;
     }
 
@@ -1262,10 +1379,18 @@ export async function buildPortfolioValueResponse({
   const years = Math.max((new Date(end).getTime() - new Date(effectiveStartDate).getTime()) / (365.25 * 86400 * 1000), 1 / 12);
   const cagr = displayTwr === null ? null : (1 + displayTwr) ** (1 / years) - 1;
 
-  const displayTwrSeries = calculateCumulativeTwrFactorSeries(
-    attributionSeries.map((entry) => ({ date: entry.date, totalValue: entry.totalValue })),
-    attributionFlows,
-  );
+  const displayTwrSeries = validTwrMode === 'account_total'
+    ? calculateCumulativeTwrFactorSeries(
+      attributionSeries.map((entry) => ({ date: entry.date, totalValue: entry.totalValue })),
+      attributionFlows,
+    )
+    : calculateInvestedCapitalTwrFactorSeriesFromTradeBoundaries(
+      rangeDates,
+      preRangeState,
+      investedCapitalTradeTransactions,
+      priceBySymbolDate,
+      fxPoints,
+    );
 
   let benchmarkTwrSeries = series.map(() => 1);
   let benchmarkReturn = 0;
