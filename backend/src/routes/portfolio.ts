@@ -966,18 +966,53 @@ export async function buildPortfolioValueResponse({
     ? twrMode
     : 'invested_capital';
 
+  const requestedRange = getDateRangeForTimeframe(validTimeframe);
+
   const anchor = getPortfolioAnchor(resolvedBaselines, resolvedTransactions);
-  const trackedSymbols = collectTrackedSymbols(anchor.baseline, anchor.transactionsToApply);
-  const splitStart = anchor.baseline?.date ?? (anchor.transactionsToApply[0]?.date ?? '1970-01-01');
+  const baselineDate = anchor.baseline?.date ?? null;
+  const sortedResolvedTransactions = sortTransactions(resolvedTransactions);
+  const earliestTransactionDate = sortedResolvedTransactions[0]?.date ?? null;
+  const earliestPreBaselineTransactionDate = baselineDate
+    ? sortedResolvedTransactions.find((tx) => tx.date < baselineDate)?.date ?? null
+    : earliestTransactionDate;
+  const includePreBaselineHistory = Boolean(
+    baselineDate
+    && earliestPreBaselineTransactionDate
+    && requestedRange.start < baselineDate,
+  );
+
+  const valuationTransactions = includePreBaselineHistory
+    ? sortedResolvedTransactions
+    : anchor.transactionsToApply;
+
+  const trackedSymbolsSet = new Set<string>();
+  if (anchor.baseline) {
+    for (const symbol of Object.keys(anchor.baseline.holdings)) {
+      trackedSymbolsSet.add(symbol);
+    }
+  }
+  for (const tx of valuationTransactions) {
+    if (tx.symbol) {
+      trackedSymbolsSet.add(tx.symbol);
+    }
+  }
+  const trackedSymbols = [...trackedSymbolsSet].sort((a, b) => a.localeCompare(b));
+
+  const splitStart = includePreBaselineHistory
+    ? (earliestTransactionDate ?? baselineDate ?? '1970-01-01')
+    : (baselineDate ?? (anchor.transactionsToApply[0]?.date ?? '1970-01-01'));
   const splitEnd = new Date().toISOString().slice(0, 10);
   const splitResult = await fetchYahooFinanceStockSplits(trackedSymbols, splitStart, splitEnd);
-  const splitEnriched = mergeMarketSplitTransactions(anchor.transactionsToApply, splitResult.splits);
+  const splitEnriched = mergeMarketSplitTransactions(valuationTransactions, splitResult.splits);
   const txs = sortTransactions(expandManualLinearOptionTransactions(splitEnriched));
   const liveUsdSgdRate = (await fetchYahooFinanceLatestPrices(['USDSGD=X'])).livePrices['USDSGD=X'] ?? null;
 
-  const startDate = resolvedBaselines.length ? resolvedBaselines[0].date : '1970-01-01';
+  const baselineStartDate = resolvedBaselines.length ? resolvedBaselines[0].date : '1970-01-01';
+  const startDate = includePreBaselineHistory && earliestTransactionDate
+    ? (earliestTransactionDate < baselineStartDate ? earliestTransactionDate : baselineStartDate)
+    : baselineStartDate;
   const rangeEnd = new Date().toISOString().slice(0, 10);
-  const range = getDateRangeForTimeframe(validTimeframe);
+  const range = requestedRange;
   const start = range.start;
   const end = range.end;
 
@@ -1033,8 +1068,21 @@ export async function buildPortfolioValueResponse({
   const holdingsByDate = new Map<string, TickerHoldingsState>();
 
   for (const date of rangeDates) {
-    const relevantTxs = txs.filter((tx) => tx.date <= date);
-    const state = reconstructState(anchor.baseline, relevantTxs);
+    const state = (() => {
+      if (includePreBaselineHistory && baselineDate && date < baselineDate) {
+        const relevantPreBaselineTxs = txs.filter((tx) => tx.date <= date);
+        return reconstructState(null, relevantPreBaselineTxs);
+      }
+
+      if (baselineDate) {
+        const relevantPostBaselineTxs = txs.filter((tx) => tx.date > baselineDate && tx.date <= date);
+        return reconstructState(anchor.baseline, relevantPostBaselineTxs);
+      }
+
+      const relevantTxs = txs.filter((tx) => tx.date <= date);
+      return reconstructState(null, relevantTxs);
+    })();
+
     holdingsByDate.set(date, { ...state.holdings });
     let holdingsValue = 0;
     for (const [symbol, quantity] of Object.entries(state.holdings)) {
